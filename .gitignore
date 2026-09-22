@@ -47,3 +47,7 @@ git-notifier.log
 
 # Local test data and scratch work (large files, never committed)
 /work
+
+# Upstream bug reports and the scripts that check them (kept here, filed with DIALS)
+/dials_*_issue.md
+/dials_*_fix_check.py

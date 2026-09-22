@@ -1098,13 +1098,14 @@ def _lorentz_applied(reflections_file: pathlib.Path) -> bool:
     Whether the data already carries the Lorentz correction.
 
     This is what decides whether the scaling program is asked to apply it: it
-    belongs in the data exactly once. Without the column the safer answer is
-    that it was applied, since that is what this pipeline does by default, and
-    the combine step has already warned about the missing provenance.
+    belongs in the data exactly once. Without the column the answer is that it
+    was not applied, which is the default both here and in dials.tof_integrate,
+    so it is what data integrated outside this pipeline most likely carries.
+    The combine step has already warned about the missing provenance.
     """
     table = flex.reflection_table.from_file(reflections_file)
     if "lorentz_applied" not in table:
-        return True
+        return False
     return bool(set(table["lorentz_applied"]).pop())
 
 
@@ -1149,6 +1150,13 @@ def export_shelx(
 ) -> pathlib.Path:
     """Run dials.export format=shelx, returning the exported hkl file."""
     intensity = _intensity_choice(working_directory / reflections, params)
+    if not _lorentz_applied(working_directory / reflections):
+        xia2_logger.warning(
+            "The exported intensities do not carry the Lorentz correction,"
+            " which lawless applies when scaling but which nothing applies to"
+            " this file. Set integration.lorentz=True if the SHELX file is the"
+            " deliverable."
+        )
     command = [
         _executable("dials.export"),
         experiments,

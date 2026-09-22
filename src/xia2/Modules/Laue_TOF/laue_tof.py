@@ -343,12 +343,16 @@ integration {
   bbox_xy_padding = 1
     .type = int
     .expert_level = 3
-  lorentz = True
+  lorentz = False
     .type = bool
-    .help = "Apply the TOF Lorentz correction during integration. Note that the"
-            "DIALS default is False. The correction must be applied exactly"
-            "once: if it is to be applied by a downstream scaling program"
-            "instead, set this to False."
+    .help = "Apply the TOF Lorentz correction during integration. The"
+            "correction must be applied exactly once, and by default it is"
+            "left to lawless (LORENTZ TOF) rather than taken here, which also"
+            "keeps the integrated intensities on the scale of the counts."
+            "Applying it here divides the intensities by lambda^4, and"
+            "dials.tof_integrate then aborts under method=profile_1d_ibix -"
+            "see dials_tof_profile_1d_ibix_assert_issue.md. Set it True only"
+            "when the scaling program will not apply it."
     .expert_level = 1
   absorption {
     enabled = False
@@ -815,7 +819,7 @@ class IntegrationParams:
     wavelength_range: tuple[float, float] | None = None
     bbox_tof_padding: int = 2
     bbox_xy_padding: int = 1
-    lorentz: bool = True
+    lorentz: bool = False
     incident_run: pathlib.Path | None = None
     empty_run: pathlib.Path | None = None
     absorption: dict[str, float] | None = None
@@ -1079,7 +1083,11 @@ def _log_setup(setup: LaueTOFSetup) -> None:
         )
     xia2_logger.info(
         "TOF Lorentz correction will "
-        + ("be applied during integration" if integration.lorentz else "not be applied")
+        + (
+            "be applied during integration"
+            if integration.lorentz
+            else "be left to lawless (LORENTZ TOF), not applied during integration"
+        )
     )
     if integration.mask == "both":
         xia2_logger.info(

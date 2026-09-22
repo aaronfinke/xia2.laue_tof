@@ -26,6 +26,12 @@ seeded (`known_orientation`), and the combine/export step writes
 and 2703 reflections, then `scale/dials.hkl` with **one SHELX batch per
 orientation** (1359 + 1344 reflections in batches 0 and 1).
 
+**Lorentz moved to lawless (2026-09-22):** `integration.lorentz` now defaults to
+`False` and lawless applies `LORENTZ TOF`. This is a workaround for a second
+DIALS defect, written up in `dials_tof_profile_1d_ibix_assert_issue.md` and not
+yet filed; nothing in DIALS was changed. See
+[Lorentz: exactly once](#lorentz-exactly-once).
+
 **Next, in order:**
 
 1. Integrate everything the geometry allows, not only the observed spots
@@ -98,13 +104,23 @@ two can be compared after scaling. Consequences, all implemented:
 - Outright failure is real: `method=profile_1d_ibix` **aborts** on the NMX test
   data (both masks, exit 134) with
   `DIALS_ASSERT(A >= min_bounds[0] && A <= max_bounds[0])` at
-  `tof_profile_1d_ibix.h:246`. `A` is hard-coded to 1.0 and `min_bounds[0]` is
-  1.0, so the assert can only fail through `max_bounds[0] = 1e4 * intensity_max`
-  being NaN — i.e. a shoebox with non-finite intensities. It kills the whole
-  run, not one reflection, and the message names no reflection. **Second DIALS
-  bug report candidate.** `integration.method` therefore defaults to
-  `profile_1d_ibix` with `fallback_method=summation`, and the fallback is
-  remembered for the remaining orientations instead of failing on each.
+  `tof_profile_1d_ibix.h:246`. **Diagnosed 2026-09-22, and it is not NaN**
+  (an earlier note here guessed that): the fit runs on `y / intensity_max`, so
+  `A`, fixed at 1.0, is in normalised units, while `max_bounds[0] =
+  1e4 · intensity_max` is in raw units. Any data whose peak projected intensity
+  is below 1e-4 therefore fails the check — the scale decides, not the data.
+  The Lorentz correction is what puts it there, since `L = sin²θ/λ⁴` is applied
+  per pixel *before* the projection and is ~1e-3 at neutron wavelengths, which
+  is why the correction now moves to lawless (see
+  [Lorentz: exactly once](#lorentz-exactly-once)). It kills the whole run, not
+  one reflection, because the fit runs in a `ThreadPool` worker that catches
+  nothing, so the exception escapes the thread and terminates the process
+  without naming a reflection. Written up in
+  `dials_tof_profile_1d_ibix_assert_issue.md`, **not yet filed**; DIALS is not
+  patched. `integration.method` still defaults to `profile_1d_ibix` with
+  `fallback_method=summation`, and the fallback is remembered for the remaining
+  orientations instead of failing on each — with `lorentz=False` the method now
+  runs, so the fallback should be the exception rather than the rule.
 - A profile run finishing is **not** the method working: `profile_3d_gutmann`
   completed on the same data but fitted **13 of 1359** reflections (~4 min,
   against 7 s for summation), leaving an `intensity.prf` column covering 1 % of
@@ -698,13 +714,32 @@ wrong as not at all. Model this as a single xia2 knob:
 lorentz.applied_by = *integrate | lawless | none
 ```
 
-- `integrate` (default) → `dials.tof_integrate corrections.lorentz=True`, lawless
+- `integrate` → `dials.tof_integrate corrections.lorentz=True`, lawless
   gets no `LORENTZ` keyword. Keeps the intermediate SHELX/MTZ physically correct
   whatever is done downstream.
-- `lawless` → integration left at `corrections.lorentz=False`, lawless gets
-  `LORENTZ TOF` (`I' = I·sin²θ/λ⁴`; `LORENTZ LAUE` is `I'=I·sin²θ`, differing only
-  in where the λ⁴ is booked — the normalisation curve absorbs whichever is left in).
+- `lawless` (**default since 2026-09-22**) → integration left at
+  `corrections.lorentz=False`, lawless gets `LORENTZ TOF` (`I' = I·sin²θ/λ⁴`;
+  `LORENTZ LAUE` is `I'=I·sin²θ`, differing only in where the λ⁴ is booked — the
+  normalisation curve absorbs whichever is left in).
 - `none` → neither; for data already corrected upstream.
+
+**Why lawless, not integrate (user, 2026-09-22):** `L` is applied per pixel
+*before* the profile projection, so it shrinks the numbers being fitted by two
+to three orders of magnitude, and `method=profile_1d_ibix` then aborts the whole
+run — `DIALS_ASSERT(A >= min_bounds[0] && A <= max_bounds[0])`, exit 134. The
+bound is `1e4 · intensity_max` in raw units against an `A` fixed at 1.0 in
+normalised units, so it is the *scale*, not the data, that decides. Verified on
+config3 (1508 reflections): `lorentz=True` aborts, `lorentz=False` integrates
+with CC(sum, prf) 0.98, and `method=summation lorentz=True` shows the
+intensities are finite and simply small (median 8.3e-4). Written up in
+`dials_tof_profile_1d_ibix_assert_issue.md`; **DIALS is not patched** — the
+pipeline works around it by leaving the correction to lawless.
+
+In the implementation this is `integration.lorentz` (now defaulting to `False`)
+plus the `lorentz_applied` column, which is what decides whether lawless is
+given `LORENTZ TOF`. A file without that column is now read as **not**
+corrected, matching both defaults. The SHELX export warns, since nothing applies
+the correction on that path.
 
 Whichever is chosen, log the decision explicitly. Expect the overall R-merge to
 move a lot when the correction is on (re-weighting of resolution shells), while
