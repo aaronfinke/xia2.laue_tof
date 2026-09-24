@@ -67,6 +67,9 @@ F_DX = 93  # 93..94
 F_THETA = 95  # 95..96
 F_DETLM = 97  # 97..104
 
+# What the intensities are scaled towards; see _counts_like_scale
+COUNTS_LIKE_MEDIAN = 1.0e3
+
 # Batch numbers are 1-based in MTZ, while imageset_id/id are 0-based
 FIRST_BATCH = 1
 
@@ -154,6 +157,30 @@ def _has_profile_intensities(table: flex.reflection_table) -> bool:
     ) and table.get_flags(table.flags.integrated_prf).count(True) > 0
 
 
+def _counts_like_scale(intensity: numpy.ndarray) -> float:
+    """
+    A power of ten that puts the intensities on a counts-like scale.
+
+    A constant factor on I and SIGI together changes nothing about scaling or
+    merging - it is absorbed by the scale factors - but the size of the numbers
+    is not neutral to the programs that read the file. dials.tof_integrate with
+    corrections.lorentz=True multiplies every intensity by sin^2(theta)/lambda^4,
+    which at neutron wavelengths is of order 1e-3, and pointless then fails its
+    normalisation outright ("NormaliseInRuns::apply Unused run 1"). The MaNDi
+    reduction guards against the same thing by writing 1000*sin^2(theta) rather
+    than sin^2(theta).
+    """
+    finite = intensity[numpy.isfinite(intensity)]
+    finite = numpy.abs(finite[finite != 0])
+    if not finite.size:
+        return 1.0
+    median = float(numpy.median(finite))
+    if median <= 0:
+        return 1.0
+    # Target a median of 1e3, in whole powers of ten so the factor is legible
+    return float(10.0 ** round(math.log10(COUNTS_LIKE_MEDIAN / median)))
+
+
 def write_unmerged_mtz(
     experiments_file: pathlib.Path,
     reflections_file: pathlib.Path,
@@ -230,8 +257,16 @@ def write_unmerged_mtz(
 
     intensity = integrated["intensity.sum.value"].as_numpy_array()
     sigma = numpy.sqrt(integrated["intensity.sum.variance"].as_numpy_array())
-    rows[:, column] = intensity
-    rows[:, column + 1] = sigma
+    scale = _counts_like_scale(intensity)
+    if scale != 1.0:
+        xia2_logger.info(
+            f"Scaling the intensities by {scale:g} to write them on a"
+            " counts-like scale, which is what pointless and lawless expect."
+            " A constant factor on I and SIGI together does not change scaling"
+            " or merging statistics."
+        )
+    rows[:, column] = intensity * scale
+    rows[:, column + 1] = sigma * scale
     column += 2
     if profile:
         prf = integrated["intensity.prf.value"].as_numpy_array().copy()
@@ -241,8 +276,8 @@ def write_unmerged_mtz(
         # flag it as missing instead of writing whatever is in the column.
         prf[~fitted] = numpy.nan
         prf_sigma[~fitted] = numpy.nan
-        rows[:, column] = prf
-        rows[:, column + 1] = prf_sigma
+        rows[:, column] = prf * scale
+        rows[:, column + 1] = prf_sigma * scale
         column += 2
     rows[:, column] = wavelength
     column += 1

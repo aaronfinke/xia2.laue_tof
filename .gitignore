@@ -51,3 +51,4 @@ git-notifier.log
 # Upstream bug reports and the scripts that check them (kept here, filed with DIALS)
 /dials_*_issue.md
 /dials_*_fix_check.py
+coda_nmx_999999_00022204.hdf

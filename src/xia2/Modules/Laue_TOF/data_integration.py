@@ -8,8 +8,6 @@ import shutil
 import subprocess
 from dataclasses import dataclass, field
 
-import h5py
-import numpy
 from dials.array_family import flex
 from dials.util.multi_dataset_handling import (
     assign_unique_identifiers,
@@ -22,9 +20,7 @@ from xia2.Driver.timing import record_step
 from xia2.Handlers.Files import FileHandler
 from xia2.Handlers.Streams import banner
 from xia2.Modules.Laue_TOF.laue_tof import (
-    NXLAUETOF,
-    NXSNSEVENT,
-    BinningParams,
+    NO_FALLBACK,
     ExportParams,
     FileInput,
     IndexingParams,
@@ -106,6 +102,22 @@ class IntegrationChoices:
     mask: str | None = None
 
 
+@dataclass
+class IntegrationPass:
+    """
+    What one call of dials.tof_integrate is asked to integrate.
+
+    A run makes either one pass over the reflections that were found, or that
+    pass followed by a second over everything the geometry predicts. The two
+    differ only in these three settings, so they travel together rather than
+    being read from the parameters at the point of use.
+    """
+
+    integration_type: str = "observed"
+    d_min: float | None = None
+    wavelength_range: tuple[float, float] | None = None
+
+
 def _executable(name: str, override: pathlib.Path | None = None) -> str:
     """Find a program, either where the user said it is or on $PATH."""
     if override:
@@ -138,54 +150,6 @@ def _run_program(
 def _record_log(tag: str, logfile: pathlib.Path) -> None:
     if logfile.is_file():
         FileHandler.record_log_file(tag, str(logfile))
-
-
-def bin_run(
-    working_directory: pathlib.Path,
-    image: str,
-    file_class: str,
-    nbins: int,
-    params: BinningParams,
-) -> pathlib.Path:
-    """
-    Reduce a raw data file to TOF bins with essnmx.
-
-    The reduced file is written into the working directory, and reused if it is
-    already there, as the reduction is the most expensive step of the pipeline.
-    """
-    output_file = working_directory / f"binned_{nbins}.h5"
-    if output_file.is_file():
-        xia2_logger.info(f"Using existing reduction {output_file}")
-        return output_file
-
-    program = _executable("essnmx-reduce", params.essnmx_reduce)
-    name = pathlib.Path(program).name
-
-    command = [
-        program,
-        "--input-file",
-        image,
-        "--nbins",
-        str(nbins),
-        "--output-file",
-        os.fspath(output_file),
-        "--overwrite",
-    ]
-    if params.min_time_bin is not None:
-        command += ["--min-time-bin", str(params.min_time_bin)]
-    if params.max_time_bin is not None:
-        command += ["--max-time-bin", str(params.max_time_bin)]
-    if params.min_time_bin is not None or params.max_time_bin is not None:
-        command += ["--time-bin-unit", params.time_bin_unit]
-    if params.detector_ids:
-        command += ["--detector-ids"] + [str(i) for i in params.detector_ids]
-    command += params.extra_args
-
-    xia2_logger.notice(banner(f"Reducing to {nbins} TOF bins"))  # type: ignore
-    _run_program(command, working_directory, name)
-    if not output_file.is_file():
-        raise ValueError(f"{name} did not write the expected output {output_file}")
-    return output_file
 
 
 # Neutron wavelength from time of flight: lambda[A] = H_OVER_M * t[s] / L[m]
@@ -271,134 +235,6 @@ def _format_class_name(image: str) -> str:
     except Exception:
         return "unknown"
     return format_class.__name__ if format_class else "none"
-
-
-def _mandi_histogram_bins(image: pathlib.Path) -> int | None:
-    """
-    The number of TOF bins already histogrammed into a MANDI event file, if any.
-
-    FormatMANDI reads the histogram from the event file itself: bin edges in
-    entry/time_of_flight, counts in entry/<bank>_events/spectra.
-    """
-    with h5py.File(image, "r") as fh:
-        entry = fh[next(iter(fh.keys()))]
-        if "time_of_flight" not in entry:
-            return None
-        spectra = [
-            name
-            for name in entry
-            if name.endswith("_events") and "spectra" in entry[name]
-        ]
-        if not spectra:
-            return None
-        return len(entry["time_of_flight"]) - 1
-
-
-def _mandi_tof_range(image: pathlib.Path, params: BinningParams) -> tuple[float, float]:
-    """
-    The time-of-flight range to histogram a MANDI run over, in microseconds.
-
-    Taken from binning.min_time_bin/max_time_bin when both are given, and
-    otherwise from the event_time_offset of every panel, which is the quantity
-    that dxtbx histograms (microseconds since the pulse).
-
-    Not from FormatMANDI.get_time_range_for_dataset: that adds event_time_zero
-    (seconds since the start of the run) to event_time_offset (microseconds
-    since the pulse), so for a run of any length it returns a range far wider
-    than any time of flight - 14700-113000 for a 23 hour MANDI run whose events
-    all arrive between 14700 and 31500 us. Histogramming over that range puts
-    every event in the first few bins, silently. It is also a Python loop over
-    every pulse of every panel, which takes minutes.
-    """
-    if params.min_time_bin is not None and params.max_time_bin is not None:
-        scale = {"ms": 1000.0, "us": 1.0, "ns": 0.001}[params.time_bin_unit]
-        return params.min_time_bin * scale, params.max_time_bin * scale
-
-    with record_step("event time-of-flight range"), h5py.File(image, "r") as fh:
-        entry = fh[next(iter(fh.keys()))]
-        limits = []
-        for name in entry:
-            if not name.endswith("_events") or "event_time_offset" not in entry[name]:
-                continue
-            offsets = entry[name]["event_time_offset"]
-            if not offsets.size:
-                continue
-            values = offsets[...]
-            limits.append((float(values.min()), float(values.max())))
-    if not limits:
-        raise ValueError(
-            f"No event_time_offset data was found in {image}, so its"
-            " time-of-flight range cannot be determined. Give"
-            " binning.min_time_bin and binning.max_time_bin."
-        )
-    min_tof = min(low for low, _ in limits)
-    max_tof = max(high for _, high in limits)
-    xia2_logger.info(
-        f"Events in {len(limits)} panels arrive between {min_tof:.0f} and"
-        f" {max_tof:.0f} us"
-    )
-    return min_tof, max_tof
-
-
-def histogram_mandi_run(
-    image: str, nbins: int, params: BinningParams, nproc: int
-) -> pathlib.Path:
-    """
-    Histogram a raw MANDI run into TOF bins, in the event file itself.
-
-    This is what FormatMANDI reads: it has no reader for a separately reduced
-    file yet, so dxtbx writes the histogram into the event file alongside the
-    events (which are kept) and dials.import then reads that same file. Nothing
-    is written if the file already carries a histogram.
-    """
-    from dxtbx.format.FormatMANDI import FormatMANDI
-
-    path = pathlib.Path(image)
-    existing = _mandi_histogram_bins(path)
-    if existing is not None:
-        xia2_logger.info(
-            f"Using the {existing} TOF bin histogram already in {path.name}."
-            " Delete entry/time_of_flight and the per-panel spectra datasets to"
-            " histogram it again."
-        )
-        return path
-
-    xia2_logger.notice(banner(f"Histogramming into {nbins} TOF bins"))  # type: ignore
-    # The reader owns the instrument geometry, so ask it for the panel size
-    # rather than repeating the detector dimensions here.
-    panel_size = FormatMANDI(os.fspath(path))._get_image_size()
-    padding = params.tof_padding
-    min_tof, max_tof = _mandi_tof_range(path, params)
-    tof_bins = numpy.linspace(min_tof - padding, max_tof + padding, nbins + 1)
-
-    xia2_logger.info(
-        f"Panels are {panel_size[0]} x {panel_size[1]} pixels, per FormatMANDI"
-    )
-    xia2_logger.info(
-        f"MANDI data is histogrammed in place: {nbins} bins of"
-        f" {(tof_bins[-1] - tof_bins[0]) / nbins:.1f} us over"
-        f" {tof_bins[0]:.0f}-{tof_bins[-1]:.0f} us are written into {path},"
-        " keeping the event data."
-    )
-    # This is what FormatMANDI.add_histogram_data_to_nxs_file does, less its
-    # generate_tof_bins call: the bin edges are given here instead, so that the
-    # bin count is the one asked for, and so that the event data is not scanned
-    # for its time range a second time.
-    with record_step("FormatMANDI.write_histogram_data"):
-        FormatMANDI.write_histogram_data(
-            nxs_file_path=os.fspath(path),
-            tof_bins=tof_bins,
-            panel_size=panel_size,
-            remove_event_data=False,
-            write_tof_bins=True,
-            nproc=nproc,
-        )
-
-    written = _mandi_histogram_bins(path)
-    if written is None:
-        raise ValueError(f"No histogram was written into {path}")
-    xia2_logger.info(f"Wrote a {written} TOF bin histogram into {path.name}")
-    return path
 
 
 def run_import(
@@ -673,18 +509,21 @@ def index(
         f"refinement.reflections.outlier.tukey.iqr_multiplier={params.outlier_iqr_multiplier}",
         f"refinement.reflections.outlier.separate_panels={params.outlier_separate_panels}",
     ]
-    if seed_crystal:
-        a_matrix = ",".join(f"{v}" for v in _primitive_setting_a_matrix(seed_crystal))
-        base_command.append(f"indexing.known_symmetry.A_matrix={a_matrix}")
-
     xia2_logger.notice(banner("Indexing"))  # type: ignore
 
     if seed_crystal:
         # Supplying an A matrix makes dials.index use the known orientation
-        # indexer, which ignores indexing.method, so there is no ladder to walk.
+        # indexer, which ignores indexing.method, so the seeded attempt is one
+        # attempt, not a ladder. It comes first because it is the cheapest way
+        # to a consistent setting, but it is only right if the crystal is in
+        # the same orientation as the exposure it came from: on data taken at
+        # several goniometer settings it is the wrong orientation, and the
+        # ladder still has to be walked.
+        a_matrix = ",".join(f"{v}" for v in _primitive_setting_a_matrix(seed_crystal))
         xia2_logger.info("Seeding with the crystal model of a previous exposure")
-        methods = [KNOWN_ORIENTATION]
+        methods = [KNOWN_ORIENTATION] + list(params.methods)
     else:
+        a_matrix = ""
         methods = list(params.methods)
 
     attempts = []
@@ -694,8 +533,15 @@ def index(
             f"output.experiments=indexed_{method}.expt",
             f"output.reflections=indexed_{method}.refl",
         ]
-        if method != KNOWN_ORIENTATION:
+        if method == KNOWN_ORIENTATION:
+            command.append(f"indexing.known_symmetry.A_matrix={a_matrix}")
+        else:
             command.append(f"indexing.method={method}")
+            if seed_crystal and method == methods[1]:
+                xia2_logger.info(
+                    "The seeded solution was not accepted, so this exposure is"
+                    " being indexed from scratch"
+                )
         try:
             _run_program(command, working_directory, "dials.index")
         except ValueError as e:
@@ -759,6 +605,7 @@ def _tof_integrate_command(
     tag: str,
     experiments: str,
     reflections: str,
+    pass_: IntegrationPass,
 ) -> list[str]:
     """The dials.tof_integrate command line for one method/mask combination."""
     command = [
@@ -767,12 +614,14 @@ def _tof_integrate_command(
         reflections,
         f"method={method}",
         f"mask={mask}",
-        f"integration_type={params.integration_type}",
+        f"integration_type={pass_.integration_type}",
         f"background_model={params.background_model}",
         f"ellipse_mask.scale={params.ellipse_mask_scale}",
         f"bbox_tof_padding={params.bbox_tof_padding}",
         f"bbox_xy_padding={params.bbox_xy_padding}",
-        f"corrections.lorentz={params.lorentz}",
+        # Always: nothing after integration can apply the Lorentz factor,
+        # and lawless has no LORENTZ keyword
+        "corrections.lorentz=True",
         f"mp.nproc={params.nproc}",
         f"output.experiments=integrated_{tag}.expt",
         f"output.reflections=integrated_{tag}.refl",
@@ -780,10 +629,10 @@ def _tof_integrate_command(
     ]
     if params.phil:
         command.insert(1, os.fspath(params.phil))
-    if params.calculated_d_min:
-        command.append(f"calculated.dmin={params.calculated_d_min}")
-    if params.wavelength_range:
-        low, high = params.wavelength_range
+    if pass_.d_min:
+        command.append(f"calculated.dmin={pass_.d_min}")
+    if pass_.wavelength_range:
+        low, high = pass_.wavelength_range
         command.append(f"wavelength_range={low},{high}")
     if params.incident_run:
         command.append(f"corrections.incident_run={os.fspath(params.incident_run)}")
@@ -841,6 +690,7 @@ def _run_tof_integrate(
     mask: str,
     experiments: str,
     reflections: str,
+    pass_: IntegrationPass,
 ) -> tuple[str, pathlib.Path]:
     """
     Integrate with one mask, falling back to summation if a profile method
@@ -851,15 +701,19 @@ def _run_tof_integrate(
     Returns the method that actually produced the output.
     """
     tag = f"{method}_{mask}"
+    if pass_.integration_type == "calculated":
+        tag = f"{tag}_calculated"
     try:
         _run_program(
-            _tof_integrate_command(params, method, mask, tag, experiments, reflections),
+            _tof_integrate_command(
+                params, method, mask, tag, experiments, reflections, pass_
+            ),
             working_directory,
             "dials.tof_integrate",
         )
     except ValueError as e:
         fallback = params.fallback_method
-        if method == fallback or fallback == "none":
+        if method == fallback or fallback == NO_FALLBACK:
             raise
         xia2_logger.warning(
             f"Integration with method={method} failed, falling back to"
@@ -870,7 +724,7 @@ def _run_tof_integrate(
             working_directory / f"tof_integrate_{tag}.log",
         )
         return _run_tof_integrate(
-            working_directory, params, fallback, mask, experiments, reflections
+            working_directory, params, fallback, mask, experiments, reflections, pass_
         )
 
     _record_log(
@@ -914,6 +768,131 @@ def _record_lorentz(reflections: pathlib.Path, applied: bool) -> None:
     table.as_file(reflections)
 
 
+def _predicted_count(experiments, d_min: float) -> int:
+    """
+    How many reflections the geometry predicts out to d_min.
+
+    Prediction is cheap next to integration - seconds against the hours that a
+    hundred thousand shoeboxes would take - so the count is worth having before
+    committing to a pass. It is an upper bound on what will be integrated,
+    since dials.tof_integrate then drops overlapping reflections and any that
+    fall outside the wavelength or time-of-flight range.
+    """
+    from dials.algorithms.spot_prediction import TOFReflectionPredictor
+
+    total = 0
+    for experiment in experiments:
+        predictor = TOFReflectionPredictor(experiment, d_min)
+        total += len(predictor.for_ub(experiment.crystal.get_A()))
+    return total
+
+
+def _d_min_for_count(experiments, target: int, d_min: float, predicted: int) -> float:
+    """
+    The resolution at which the geometry predicts about target reflections.
+
+    Found by prediction rather than from the d^-3 that the number of
+    reflections in a sphere follows, because a Laue-TOF experiment does not
+    record a sphere: the wavelength band and the detector coverage both cut
+    into it, so the analytic estimate comes out optimistic and a user who
+    followed it would be refused a second time. It is only ever computed to
+    put a number in that refusal, and prediction is a second or two.
+    """
+    low, high = d_min, d_min * (predicted / target) ** (1 / 3)
+    for _ in range(8):
+        if _predicted_count(experiments, high) <= target:
+            break
+        low, high = high, high * 1.2
+    else:
+        return high
+    for _ in range(5):
+        middle = 0.5 * (low + high)
+        if _predicted_count(experiments, middle) <= target:
+            high = middle
+        else:
+            low = middle
+    return high
+
+
+def _integrate_calculated(
+    working_directory: pathlib.Path,
+    params: IntegrationParams,
+    method: str,
+    mask: str,
+    experiments: str,
+    reflections: str,
+    observed: pathlib.Path,
+) -> tuple[str, pathlib.Path]:
+    """
+    Integrate every reflection the geometry predicts, not only those observed.
+
+    This is the second pass of a calculated run. The first has already fixed
+    the method and the mask on the spots that were found, which is cheap; this
+    one measures everything that can have been recorded, most of it weak. That
+    is the point: where to cut is a merging decision, taken on CC-half after
+    scaling, and re-merging costs nothing where re-integrating costs
+    everything.
+    """
+    expts = load.experiment_list(working_directory / experiments, check_format=False)
+    limit, _ = geometric_d_min(expts[0])
+    d_min = params.calculated_d_min or limit
+    if params.calculated_d_min:
+        xia2_logger.info(
+            f"Integrating every predicted reflection to"
+            f" integration.calculated_d_min = {d_min:.3f} A"
+            + (
+                f", beyond the {limit:.3f} A the geometry allows"
+                if d_min < limit
+                else f" ({limit:.3f} A is the geometric limit)"
+            )
+        )
+    else:
+        xia2_logger.info(
+            f"Integrating every predicted reflection to the geometric limit of"
+            f" {d_min:.3f} A"
+        )
+
+    # The band the data actually cover. Predictions outside it cannot have been
+    # recorded, and integrating them adds noise with a Miller index on it. Only
+    # the calculated pass needs this: an observed reflection is inside the band
+    # by construction, having been found in the data.
+    band = params.wavelength_range or wavelength_range(expts[0])
+
+    n_predicted = _predicted_count(expts, d_min)
+    n_observed = flex.reflection_table.from_file(observed).size()
+    xia2_logger.info(
+        f"{n_predicted} reflections predicted to {d_min:.3f} A, against"
+        f" {n_observed} integrated from the spot list"
+        f" ({n_predicted / max(n_observed, 1):.0f}x), over wavelengths"
+        f" {band[0]:.2f}-{band[1]:.2f} A"
+    )
+    if n_predicted > params.max_predicted:
+        suggestion = _d_min_for_count(expts, params.max_predicted, d_min, n_predicted)
+        raise ValueError(
+            f"{n_predicted} predicted reflections is more than"
+            f" integration.max_predicted ({params.max_predicted}). Integrating"
+            f" them would take hours. Either raise the guard, or set"
+            f" integration.calculated_d_min to about {suggestion:.2f} A, which"
+            f" is where this crystal reaches that many reflections."
+        )
+
+    method, integrated = _run_tof_integrate(
+        working_directory,
+        params,
+        method,
+        mask,
+        experiments,
+        reflections,
+        IntegrationPass("calculated", d_min, band),
+    )
+    n_integrated = flex.reflection_table.from_file(integrated).size()
+    xia2_logger.info(
+        f"Integrated {n_integrated} of the {n_predicted} predicted reflections;"
+        f" the {n_observed} from the spot list are kept in {observed.name}"
+    )
+    return method, integrated
+
+
 def integrate(
     working_directory: pathlib.Path,
     params: IntegrationParams,
@@ -943,7 +922,13 @@ def integrate(
     integrated_files = {}
     for mask in masks:
         method, integrated = _run_tof_integrate(
-            working_directory, params, method, mask, experiments, reflections
+            working_directory,
+            params,
+            method,
+            mask,
+            experiments,
+            reflections,
+            IntegrationPass(),
         )
         integrated_files[mask] = integrated
     choices.method = method
@@ -964,13 +949,27 @@ def integrate(
         mask = masks[0]
     choices.mask = mask
 
+    chosen = integrated_files[mask]
+    if params.integration_type == "calculated":
+        # The first pass is always over the observed spots: it is what chooses
+        # the method and the mask, at a hundredth of the cost of doing that
+        # comparison on every predicted reflection. Its output is left on disk
+        # as a checkpoint, being a strict subset of what follows.
+        # A profile method that survived the observed pass can still fail here,
+        # where most of the shoeboxes hold no peak, so the method that came out
+        # of this pass is the one the remaining orientations use.
+        method, chosen = _integrate_calculated(
+            working_directory, params, method, mask, experiments, reflections, chosen
+        )
+        choices.method = method
+
     integrated = working_directory / "integrated.refl"
-    shutil.copyfile(integrated_files[mask], integrated)
+    shutil.copyfile(chosen, integrated)
     shutil.copyfile(
-        integrated_files[mask].with_suffix(".expt"),
+        chosen.with_suffix(".expt"),
         working_directory / "integrated.expt",
     )
-    _record_lorentz(integrated, params.lorentz)
+    _record_lorentz(integrated, True)
     FileHandler.record_data_file(str(working_directory / "integrated.expt"))
     FileHandler.record_data_file(str(integrated))
     return integrated
@@ -1097,11 +1096,12 @@ def _lorentz_applied(reflections_file: pathlib.Path) -> bool:
     """
     Whether the data already carries the Lorentz correction.
 
-    This is what decides whether the scaling program is asked to apply it: it
-    belongs in the data exactly once. Without the column the answer is that it
-    was not applied, which is the default both here and in dials.tof_integrate,
-    so it is what data integrated outside this pipeline most likely carries.
-    The combine step has already warned about the missing provenance.
+    This pipeline always applies it at integration, so the answer is yes for
+    anything it produced; the check exists for files it did not, which it can
+    be pointed at by rerunning in an old directory. Without the column the
+    answer is no, which is what dials.tof_integrate defaults to and so what
+    data integrated elsewhere most likely carries. The combine step has already
+    warned about the missing provenance.
     """
     table = flex.reflection_table.from_file(reflections_file)
     if "lorentz_applied" not in table:
@@ -1128,17 +1128,18 @@ def _report_lorentz(table: flex.reflection_table) -> None:
         raise ValueError(
             "Some orientations were integrated with the Lorentz correction and"
             " some without, so they cannot be scaled together. Reintegrate them"
-            " the same way (integration.lorentz)."
+            " the same way."
         )
     if applied.pop():
         xia2_logger.info(
-            "The Lorentz correction was applied during integration, so it must"
-            " not be applied again when scaling."
+            "The Lorentz correction was applied during integration, which is"
+            " the only place this pipeline can take it."
         )
     else:
-        xia2_logger.info(
-            "The Lorentz correction was not applied during integration, so it"
-            " must be applied when scaling."
+        xia2_logger.warning(
+            "The Lorentz correction was not applied during integration, and no"
+            " step after this one can apply it. These data were not integrated"
+            " by this pipeline, which always applies it; reintegrate them."
         )
 
 
@@ -1152,10 +1153,9 @@ def export_shelx(
     intensity = _intensity_choice(working_directory / reflections, params)
     if not _lorentz_applied(working_directory / reflections):
         xia2_logger.warning(
-            "The exported intensities do not carry the Lorentz correction,"
-            " which lawless applies when scaling but which nothing applies to"
-            " this file. Set integration.lorentz=True if the SHELX file is the"
-            " deliverable."
+            "The exported intensities do not carry the Lorentz correction, and"
+            " nothing else applies it - lawless has no LORENTZ keyword. These"
+            " data were not integrated by this pipeline; reintegrate them."
         )
     command = [
         _executable("dials.export"),
@@ -1202,47 +1202,6 @@ def unmerged_mtz(
     )
     FileHandler.record_data_file(str(mtz_file))
     return mtz_file
-
-
-def _prepare_images(
-    working_directory: pathlib.Path,
-    image: str,
-    file_class: str,
-    setup: LaueTOFSetup,
-) -> tuple[str, str]:
-    """
-    Get the files to index and to integrate from one input file.
-
-    These are the same file unless the input needs reducing and two different
-    binnings have been asked for, in which case the coarser reduction is
-    indexed and the finer one integrated.
-    """
-    binning = setup.binning_params
-    if "bin" not in setup.options.steps or image not in setup.files_to_bin:
-        return image, image
-    if file_class == NXSNSEVENT:
-        # MANDI: one histogram, written into the event file itself, so the file
-        # to index and the file to integrate are both the input file.
-        if not binning.single_reduction:
-            xia2_logger.warning(
-                "MANDI data is histogrammed in place, which allows one binning"
-                f" per file, so binning.index_bins ({binning.index_bins}) is"
-                f" used and binning.integrate_bins ({binning.integrate_bins})"
-                " is ignored."
-            )
-        histogrammed = os.fspath(
-            histogram_mandi_run(image, binning.index_bins, binning, setup.options.nproc)
-        )
-        return histogrammed, histogrammed
-    index_image = os.fspath(
-        bin_run(working_directory, image, file_class, binning.index_bins, binning)
-    )
-    if binning.single_reduction:
-        return index_image, index_image
-    integrate_image = os.fspath(
-        bin_run(working_directory, image, file_class, binning.integrate_bins, binning)
-    )
-    return index_image, integrate_image
 
 
 def _refined_crystal(working_directory: pathlib.Path) -> Crystal:
@@ -1297,70 +1256,26 @@ def process_exposure(
     choices: IntegrationChoices | None = None,
 ) -> ExposureResult:
     """
-    Process one crystal orientation: bin, import, find spots, index, refine
-    and integrate, in its own directory.
-
-    If the indexing and integration binnings differ, the orientation is
-    determined on the coarser reduction and then carried into the finer one,
-    which is processed in a subdirectory.
+    Process one crystal orientation: import, find spots, index, refine and
+    integrate, in its own directory.
     """
     working_directory.mkdir(parents=True, exist_ok=True)
     name = working_directory.name
     xia2_logger.notice(banner(f"Processing {name}"))  # type: ignore
     xia2_logger.info(f"Input: {image}")
 
-    file_class = setup.input_classes.get(image, NXLAUETOF)
     result = ExposureResult(name=name, directory=working_directory, image=image)
 
-    index_image, integrate_image = _prepare_images(
-        working_directory, image, file_class, setup
-    )
-
     if not _index_and_refine(
-        working_directory, index_image, setup, result, seed_crystal, path_type
+        working_directory, image, setup, result, seed_crystal, path_type
     ):
         return result
 
     if "integrate" not in setup.options.steps:
         return result
 
-    if integrate_image == index_image:
-        integrate(working_directory, setup.integration_params, choices)
-        result.integrated = True
-        return result
-
-    # A finer reduction was asked for to integrate against. It is a different
-    # file, with its own imageset, so it has to be processed in its own right -
-    # but seeded with the orientation just refined, rather than indexed afresh.
-    xia2_logger.info(
-        f"Carrying the refined orientation into the"
-        f" {setup.binning_params.integrate_bins} bin reduction"
-    )
-    integrate_directory = (
-        working_directory / f"bins_{setup.binning_params.integrate_bins}"
-    )
-    integrate_directory.mkdir(parents=True, exist_ok=True)
-    integrate_result = ExposureResult(
-        name=f"{name}/{integrate_directory.name}",
-        directory=integrate_directory,
-        image=integrate_image,
-    )
-    if not _index_and_refine(
-        integrate_directory,
-        integrate_image,
-        setup,
-        integrate_result,
-        _refined_crystal(working_directory),
-    ):
-        xia2_logger.warning(
-            f"{name}: the refined orientation could not be transferred to the"
-            " integration binning, so this orientation was not integrated"
-        )
-        return result
-
-    integrate(integrate_directory, setup.integration_params, choices)
+    integrate(working_directory, setup.integration_params, choices)
     result.integrated = True
-    result.directory = integrate_directory
     return result
 
 
@@ -1399,6 +1314,9 @@ def run_data_integration(
 
     results: list[ExposureResult] = []
     seed_crystal: Crystal | None = None
+    # How many exposures were processed before there was a model to seed with.
+    # Only those can gain anything from a second attempt.
+    seeded_from = len(inputs)
     choices = IntegrationChoices()
 
     for i, (path_type, image) in enumerate(inputs, start=1):
@@ -1413,11 +1331,14 @@ def run_data_integration(
             and result.indexed
         ):
             seed_crystal = result.indexing.crystal  # type: ignore[union-attr]
+            seeded_from = i
 
-    # Retry anything that did not index, now that there is a model to seed with
+    # Retry anything that did not index, now that there is a model to seed
+    # with. An exposure that already had the seed on its first attempt is not
+    # retried: it would be the same run of the same program on the same data.
     if seed_crystal and setup.indexing_params.seed_from_first:
         for i, result in enumerate(results):
-            if result.indexed or not result.n_strong:
+            if result.indexed or not result.n_strong or i >= seeded_from:
                 continue
             xia2_logger.info(f"Retrying {result.name} with the seed crystal")
             retried = process_exposure(

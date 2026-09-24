@@ -1,533 +1,26 @@
 from __future__ import annotations
 
 import errno
+import functools
+import importlib
 import logging
 import os
 import pathlib
 from dataclasses import dataclass, field
 
-import h5py
 import iotbx.phil
 from cctbx import crystal, sgtbx, uctbx
 from dials.util.system import CPU_COUNT
-from libtbx import Auto, AutoType
+from libtbx import Auto
 
+from xia2.Modules.Laue_TOF.laue_tof_phil import *
 from xia2.Modules.Laue_TOF.util import report_timing
 
 xia2_logger = logging.getLogger(__name__)
 
-# Input file classes, as identified from the NeXus entry. NXlauetof files are
-# already TOF-binned and can go straight to dials.import; the others hold raw
-# event data and must be reduced first (see BinningParams).
-NXLAUETOF = "nxlauetof"
-TOFRAW = "tofraw"
-NXSNSEVENT = "nxsnsevent"
-UNKNOWN = "unknown"
 
-# Integration methods, as named by dials.tof_integrate
-INTEGRATION_METHODS = ("summation", "profile_1d_ibix", "profile_3d_gutmann")
-# Indexing methods that work with polychromatic (Laue-TOF) data
-INDEXING_METHODS = (
-    "fft3d",
-    "fft1d",
-    "real_space_grid_search",
-    "low_res_spot_match",
-    "pink_indexer",
-)
-
-phil_str = """
-image = None
-  .type = str
-  .multiple = True
-  .help = "Path to an image file. Give one per crystal orientation (setting)."
-  .expert_level = 0
-template = None
-  .type = str
-  .multiple = True
-  .help = "The image sequence template"
-  .expert_level = 0
-directory = None
-  .type = str
-  .multiple = True
-  .help = "A directory with images"
-  .expert_level = 0
-vanadium_run = None
-  .type = path
-  .help = "Incident run (e.g. vanadium), used to normalise the intensities by the"
-          "incident spectrum during integration. Optional, but recommended."
-  .expert_level = 0
-empty_run = None
-  .type = path
-  .help = "Empty instrument run, used to correct the incident run for background."
-          "Only used if vanadium_run is also given."
-  .expert_level = 0
-mask = None
-  .type = path
-  .help = "A mask to use for spotfinding and integration"
-  .expert_level = 1
-space_group = None
-  .type = space_group
-  .help = "Space group to be used for indexing and integration."
-  .expert_level = 0
-d_min = None
-  .type = float
-  .help = "High resolution cutoff for spotfinding."
-  .expert_level = 1
-d_max = None
-  .type = float
-  .help = "Low resolution cutoff for spotfinding."
-  .expert_level = 1
-multiprocessing {
-  nproc = Auto
-    .type = int
-    .expert_level = 2
-}
-dials_import.phil = None
-  .type = path
-  .help = "Phil file to use for dials.import. Parameters defined in the"
-          "xia2.laue_tof phil scope will take precedent over identical options"
-          "defined in the phil file."
-  .expert_level = 3
-"""
-
-binning_phil_str = """
-binning {
-  enabled = Auto
-    .type = bool
-    .help = "Reduce the raw data to TOF bins with essnmx before importing."
-            "Auto means bin only those input files that are not already binned"
-            "(i.e. that are not NXlauetof files). Set to False to use the input"
-            "files exactly as given."
-    .expert_level = 1
-  index_bins = 50
-    .type = int(value_min=1)
-    .help = "Number of TOF bins in the reduction used for spotfinding and"
-            "indexing. Coarser binning indexes more reliably."
-    .expert_level = 1
-  integrate_bins = 200
-    .type = int(value_min=1)
-    .help = "Number of TOF bins in the reduction used for integration. Finer"
-            "binning resolves more reflections. If equal to index_bins, a single"
-            "reduction is made and used for both."
-    .expert_level = 1
-  min_time_bin = None
-    .type = float
-    .help = "Lower edge of the time range to bin over, in time_bin_unit."
-    .expert_level = 2
-  max_time_bin = None
-    .type = float
-    .help = "Upper edge of the time range to bin over, in time_bin_unit."
-    .expert_level = 2
-  time_bin_unit = ms *us ns
-    .type = choice
-    .expert_level = 2
-  detector_ids = None
-    .type = ints
-    .help = "Detector panels to reduce. Defaults to all panels."
-    .expert_level = 2
-  essnmx_reduce = None
-    .type = path
-    .help = "Path to the essnmx-reduce executable, used for NMX data."
-            "Defaults to looking it up on $PATH."
-    .expert_level = 3
-  tof_padding = 100
-    .type = float
-    .help = "Padding (microseconds) added to each end of the time-of-flight"
-            "range when histogramming event data in place, as dxtbx does for"
-            "MANDI. This is the dxtbx default. The detector geometry that goes"
-            "with it, panel size included, is read from the format class, not"
-            "set here."
-    .expert_level = 2
-  extra_args = None
-    .type = str
-    .multiple = True
-    .help = "Additional command line arguments, passed through to the reduction"
-            "program unchanged e.g. extra_args=--chunk-size-events=100000"
-    .expert_level = 3
-}
-"""
-
-spotfinding_phil_str = """
-spotfinding {
-  min_spot_size = 15
-    .type = int
-    .help = "The minimum spot size to allow in spotfinding. Note that this is"
-            "deliberately larger than the DIALS TOF default of 6, which admits"
-            "small split peaks; raising it markedly improves the positional"
-            "residuals of the indexing solution."
-    .expert_level = 1
-  max_spot_size = None
-    .type = int
-    .help = "The maximum spot size to allow in spotfinding."
-    .expert_level = 2
-  threshold_algorithm = dispersion *dispersion_extended radial_profile
-    .type = choice
-    .expert_level = 2
-  max_strong = 35000
-    .type = int
-    .help = "If more than this many strong spots are found, stop rather than"
-            "proceeding to indexing. Large spot lists trip an assertion in the"
-            "DIALS TOF reflection predictor during refinement."
-    .expert_level = 3
-  phil = None
-    .type = path
-    .help = "Phil options file to use for spotfinding. Parameters defined in"
-            "the xia2.laue_tof phil scope will take precedent over identical"
-            "options defined in the phil file."
-    .expert_level = 3
-}
-"""
-
-indexing_phil_str = """
-indexing {
-  unit_cell = None
-    .type = unit_cell
-    .expert_level = 0
-  method = None
-    .type = str
-    .help = "Indexing method to use. If None, each method given in"
-            "indexing.ladder is tried in turn until one succeeds."
-    .expert_level = 1
-  ladder = fft3d real_space_grid_search fft1d
-    .type = strings
-    .help = "Indexing methods to try, in order, when indexing.method is not set."
-            "fft1d is the method that succeeds on sparse, narrow-wedge data from"
-            "distant detector layouts, where fft3d cannot populate its grid."
-    .expert_level = 2
-  max_cell = None
-    .type = float
-    .help = "Fixed maximum cell length (Angstrom) for the basis vector search."
-            "If None, it is set to max_cell_multiplier times the longest edge of"
-            "indexing.unit_cell, or left to the DIALS nearest-neighbour estimate"
-            "if no unit cell is given. The estimate is unreliable on sparse"
-            "Laue-TOF spot lists."
-    .expert_level = 2
-  max_cell_multiplier = 1.3
-    .type = float(value_min=1.0)
-    .expert_level = 3
-  d_min_start = 4.0
-    .type = float
-    .help = "Resolution limit for the first macrocycle of indexing refinement."
-    .expert_level = 2
-  min_spots = 10
-    .type = int
-    .help = "Only attempt to index an exposure with at least this many strong spots."
-    .expert_level = 2
-  min_indexed = 50
-    .type = int
-    .help = "Reject an indexing solution with fewer than this many indexed"
-            "reflections, and move on to the next method in the ladder. This is"
-            "a floor: min_indexed_fraction of the strong spots is used when that"
-            "is the larger number."
-    .expert_level = 2
-  min_indexed_fraction = 0.25
-    .type = float(value_min=0, value_max=1)
-    .help = "Reject an indexing solution that indexes a smaller fraction of the"
-            "strong spots than this. A fraction travels between datasets in a"
-            "way an absolute count does not: a good MANDI solution indexes 65%"
-            "of 227 spots, which an absolute cut of 250 would have thrown away,"
-            "while a bad solution on 2300 NMX spots can index 300 of them."
-    .expert_level = 2
-  max_rmsd_px = 5.0
-    .type = float
-    .help = "Reject an indexing solution whose positional RMSD is worse than"
-            "this, in pixels. Indexing plenty of reflections on a cell of the"
-            "right size is not enough: fft3d has been seen to take 39% of a"
-            "MANDI spot list at 6.1 px where another method fitted the same data"
-            "at 3.2 px. Note this RMSD covers every indexed reflection, so it"
-            "runs higher than the RMSD_X/RMSD_Y dials.index reports after"
-            "outlier rejection. None turns the test off."
-    .expert_level = 2
-  target_rmsd_px = 2.0
-    .type = float
-    .help = "An accepted solution this good stops the ladder. Otherwise every"
-            "method in the ladder is tried and the best by RMSD is kept, since"
-            "the first method to give an acceptable answer is not necessarily"
-            "the one that fits best. None makes the first acceptable solution"
-            "win, as before."
-    .expert_level = 2
-  seed_from_first = True
-    .type = bool
-    .help = "Seed the indexing of each exposure with the crystal model of the"
-            "first exposure that indexed. All exposures are measurements of the"
-            "same crystal, so this both enforces a consistent setting and"
-            "recovers orientations that will not index on their own."
-    .expert_level = 1
-  outlier {
-    algorithm = auto *mcd tukey sauter_poon null
-      .type = choice
-      .help = "Outlier rejection algorithm used in indexing refinement. The"
-              "residuals of sparse Laue-TOF data carry a heavy tail that a"
-              "tight cut is needed to remove."
-      .expert_level = 2
-    iqr_multiplier = 0.8
-      .type = float
-      .expert_level = 3
-    separate_panels = True
-      .type = bool
-      .expert_level = 3
-  }
-  phil = None
-    .type = path
-    .help = "Phil options file to use for indexing. Parameters defined in the"
-            "xia2.laue_tof phil scope will take precedent over identical options"
-            "defined in the phil file."
-    .expert_level = 3
-}
-"""
-
-integration_phil_str = """
-integration {
-  method = summation *profile_1d_ibix profile_3d_gutmann
-    .type = choice
-    .help = "Integration method. Summation intensities are written whichever"
-            "method is chosen; a profile method adds intensity.prf alongside"
-            "them. Profile fitting is not robust on all data - it can abort the"
-            "whole run on a bad shoebox - so see fallback_method."
-    .expert_level = 1
-  fallback_method = *summation none
-    .type = choice
-    .help = "What to run when a profile method fails outright. The failure and"
-            "the fallback are logged, and the fallback is then used for the"
-            "remaining orientations rather than failing again on each."
-    .expert_level = 2
-  min_profile_fraction = 0.5
-    .type = float(value_min=0, value_max=1)
-    .help = "The fraction of reflections a profile method has to fit for its"
-            "intensities to be usable. A profile run can finish successfully"
-            "having fitted almost nothing - profile_3d_gutmann fitted 13 of"
-            "1359 reflections on NMX test data - which is worse than useless,"
-            "because the profile column then exists but covers a handful of"
-            "reflections. Below this fraction the summation intensities are"
-            "used instead and the remaining orientations skip the profile fit."
-    .expert_level = 2
-  integration_type = *observed calculated
-    .type = choice
-    .help = "observed integrates only reflections observed during spotfinding,"
-            "calculated integrates all reflections out to calculated_d_min."
-    .expert_level = 2
-  calculated_d_min = None
-    .type = float
-    .help = "Resolution limit used when integration_type=calculated."
-    .expert_level = 2
-  background_model = constant2d constant3d linear2d *linear3d
-    .type = choice
-    .expert_level = 2
-  mask = ellipse seed_skewness *both
-    .type = choice
-    .help = "Foreground/background mask method. both integrates twice, once"
-            "with each mask, and keeps the better of the two (see"
-            "mask_metric). The masks partition the shoebox differently, so"
-            "which one is better is data dependent: seed_skewness typically"
-            "takes in more of the peak tails and gives higher I/sigma, at"
-            "several times the run time. The choice made on the first"
-            "orientation is reused for the rest, so that every batch is"
-            "integrated the same way."
-    .expert_level = 2
-  mask_metric = *i_over_sigma n_integrated
-    .type = choice
-    .help = "How to choose between the two masks when mask=both. Neither is a"
-            "substitute for merging statistics, which are only available after"
-            "scaling: treat the choice as a starting point and check it there."
-    .expert_level = 3
-  ellipse_mask_scale = 1.0
-    .type = float(value_min=0.5)
-    .expert_level = 3
-  wavelength_range = None
-    .type = floats(size=2)
-    .help = "Reflections outside this wavelength range (Angstrom) are not integrated."
-    .expert_level = 2
-  bbox_tof_padding = 2
-    .type = int
-    .expert_level = 3
-  bbox_xy_padding = 1
-    .type = int
-    .expert_level = 3
-  lorentz = False
-    .type = bool
-    .help = "Apply the TOF Lorentz correction during integration. The"
-            "correction must be applied exactly once, and by default it is"
-            "left to lawless (LORENTZ TOF) rather than taken here, which also"
-            "keeps the integrated intensities on the scale of the counts."
-            "Applying it here divides the intensities by lambda^4, and"
-            "dials.tof_integrate then aborts under method=profile_1d_ibix -"
-            "see dials_tof_profile_1d_ibix_assert_issue.md. Set it True only"
-            "when the scaling program will not apply it."
-    .expert_level = 1
-  absorption {
-    enabled = False
-      .type = bool
-      .help = "Apply the spherical absorption correction. Requires the target"
-              "spectrum parameters below to be set."
-      .expert_level = 2
-    sample_number_density = None
-      .type = float
-      .help = "Sample number density (atoms/A^3) of the crystal."
-      .expert_level = 2
-    sample_radius = None
-      .type = float
-      .help = "Sample radius (mm) of the crystal."
-      .expert_level = 2
-    scattering_x_section = None
-      .type = float
-      .help = "Sample scattering cross section (barns) of the crystal."
-      .expert_level = 2
-    absorption_x_section = None
-      .type = float
-      .help = "Sample absorption cross section (barns) of the crystal."
-      .expert_level = 2
-  }
-  phil = None
-    .type = path
-    .help = "Phil options file to use for integration. Parameters defined in the"
-            "xia2.laue_tof phil scope will take precedent over identical options"
-            "defined in the phil file."
-    .expert_level = 3
-}
-"""
-
-output_phil_str = """
-output {
-  intensity = *auto sum profile
-    .type = choice
-    .help = "Which intensities to export. auto uses the profile-fitted"
-            "intensities when they are present and cover at least"
-            "integration.min_profile_fraction of the reflections, and the"
-            "summation intensities otherwise. dials.export refuses its own auto"
-            "when both columns exist, so one is always chosen here explicitly."
-    .expert_level = 1
-  composition = CH
-    .type = str
-    .help = "Chemical composition of the asymmetric unit, written into the SHELX"
-            ".ins file that accompanies the exported intensities."
-    .expert_level = 2
-  phil = None
-    .type = path
-    .help = "Phil options file to use for the export. Parameters defined in the"
-            "xia2.laue_tof phil scope will take precedent over identical options"
-            "defined in the phil file."
-    .expert_level = 3
-}
-"""
-
-scaling_phil_str = """
-scaling {
-  pointless {
-    executable = None
-      .type = path
-      .help = "Path to pointless. Defaults to $CCP4/bin/pointless, then $PATH."
-              "The build must be newer than 1.13.6: older ones drop the"
-              "wavelength column, which makes LAUE fatal in lawless."
-      .expert_level = 1
-    lauegroup = None
-      .type = str
-      .help = "Laue group passed to pointless. Defaults to the one implied by"
-              "the space group. Symmetry determination on unnormalised Laue data"
-              "is unreliable - the wavelength dependence inflates the"
-              "disagreement between symmetry mates - so the group is always"
-              "given rather than left to pointless."
-      .expert_level = 1
-    space_group = None
-      .type = space_group
-      .help = "Space group passed to pointless as CHOOSE SPACEGROUP. Defaults to"
-              "the space group used for indexing."
-      .expert_level = 1
-    keywords = None
-      .type = str
-      .multiple = True
-      .help = "Extra pointless keyword lines, appended after the generated ones."
-      .expert_level = 2
-  }
-  lawless {
-    executable = None
-      .type = path
-      .help = "Path to lawless (the Laue branch of aimless). Defaults to"
-              "'lawless' then 'aimless' on $PATH."
-      .expert_level = 1
-    probe = *neutron xray
-      .type = choice
-      .expert_level = 2
-    normalisation = *gpr chebyshev none
-      .type = choice
-      .help = "How the incident spectrum is modelled: a Gaussian process"
-              "(NORMGPR), a Chebyshev polynomial (NORMCHEBYSHEV) or not at all."
-      .expert_level = 1
-    lam_min = None
-      .type = float
-      .help = "Wavelength range the normalisation curve covers. Defaults to the"
-              "range of the data."
-      .expert_level = 2
-    lam_max = None
-      .type = float
-      .expert_level = 2
-    lam_ref = None
-      .type = float
-      .help = "Reference wavelength the curve is normalised to (NORMLAMREF)."
-              "Defaults to the middle of the range."
-      .expert_level = 2
-    chebyshev_degree = 6
-      .type = int
-      .expert_level = 2
-    gpr_bins = None
-      .type = int
-      .help = "Training bins for the Gaussian process (NORMGPRBINS). Too many"
-              "gives a curve with structure finer than the physics justifies."
-      .expert_level = 2
-    scales = "BATCH BFACTOR ON SECONDARY 0"
-      .type = str
-      .help = "The scale model, as the SCALES keyword takes it. One scale and"
-              "one B factor per batch, which with a handful of stationary"
-              "exposures may already be over-parameterised."
-      .expert_level = 1
-    sdcorrection = "NOREFINE 1.0 0.0 0.0"
-      .type = str
-      .help = "SDCORRECTION keyword. The default leaves the sigmas alone, so"
-              "that I/sigma stays comparable with the unscaled data."
-      .expert_level = 2
-    anomalous = False
-      .type = bool
-      .expert_level = 2
-    resolution = None
-      .type = floats(size=2)
-      .help = "Resolution range to scale over. The cutoff is a merging"
-              "decision, so it belongs here rather than at integration."
-      .expert_level = 1
-    lambda_only = False
-      .type = bool
-      .help = "Run the LAMBDAONLY diagnostic, which fits the wavelength curve"
-              "and stops."
-      .expert_level = 2
-    keywords = None
-      .type = str
-      .multiple = True
-      .help = "Extra lawless keyword lines, appended after the generated ones,"
-              "so that they win."
-      .expert_level = 2
-  }
-}
-"""
-
-workflow_phil_str = """
-workflow {
-  steps = *bin *find_spots *index *refine *integrate *combine *export \
-          *unmerged_mtz *pointless *lawless *report
-    .type = choice(multi=True)
-    .help = "Option to turn off particular steps. Multiple choices should be of"
-            "the format steps=find_spots+index"
-    .expert_level = 3
-}
-"""
-
-full_phil_str = (
-    phil_str
-    + binning_phil_str
-    + spotfinding_phil_str
-    + indexing_phil_str
-    + integration_phil_str
-    + output_phil_str
-    + scaling_phil_str
-    + workflow_phil_str
-)
+# What a failed profile method can fall back to, besides another method
+NO_FALLBACK = "none"
 
 
 def _resolved_file(value: str | None) -> pathlib.Path | None:
@@ -542,91 +35,78 @@ def _resolved_file(value: str | None) -> pathlib.Path | None:
     return path
 
 
-def _has_event_data(group: h5py.Group, max_depth: int = 3) -> bool:
+@functools.cache
+def _program_choices(module: str, path: str) -> tuple[str, ...]:
     """
-    Whether a NeXus group holds unbinned event data.
+    The values a choice parameter of another program's phil allows.
 
-    Raw data from both NMX and MANDI stores its events in NXevent_data groups,
-    which a TOF binned file does not have.
-    """
-    if max_depth < 0:
-        return False
-    nx_class = group.attrs.get("NX_class", "")
-    if isinstance(nx_class, bytes):
-        nx_class = nx_class.decode()
-    if nx_class == "NXevent_data" or "event_time_offset" in group:
-        return True
-    return any(
-        _has_event_data(item, max_depth - 1)
-        for item in group.values()
-        if isinstance(item, h5py.Group)
-    )
-
-
-def _instrument_name(entry: h5py.Group) -> str:
-    """The instrument name an entry declares, if any."""
-    try:
-        name = entry["instrument"]["name"][()]
-    except (KeyError, TypeError, ValueError):
-        return ""
-    if hasattr(name, "__len__") and not isinstance(name, bytes):
-        if not len(name):
-            return ""
-        name = name[0]
-    return name.decode() if isinstance(name, bytes) else str(name)
-
-
-def _entry_definition(entry: h5py.Group) -> str:
-    """The NeXus application definition of an entry, if it declares one."""
-    for key in ("definition", "definitions"):
-        if key in entry:
-            value = entry[key][()]
-            if isinstance(value, bytes):
-                return value.decode()
-            if hasattr(value, "__len__") and len(value):
-                first = value[0]
-                return first.decode() if isinstance(first, bytes) else str(first)
-            return str(value)
-    return ""
-
-
-def classify_input(filename: pathlib.Path) -> str:
-    """
-    Identify what kind of data a NeXus file holds.
-
-    Returns NXLAUETOF for data that has already been reduced to TOF bins and can
-    be passed straight to dials.import, TOFRAW or NXSNSEVENT for raw data that
-    must be reduced first, or UNKNOWN for anything that is not a NeXus file we
-    recognise (e.g. ISIS SXD files, which dials.import reads directly).
+    Asked of the program rather than listed here, so that a DIALS which gains
+    or loses a method needs no change on this side, and a name this pipeline
+    would have accepted cannot turn out to be one the program has never heard
+    of.
     """
     try:
-        with h5py.File(filename, "r") as handle:
-            for name in handle:
-                entry = handle[name]
-                if not isinstance(entry, h5py.Group):
-                    continue
-                nx_class = entry.attrs.get("NX_class", "")
-                if isinstance(nx_class, bytes):
-                    nx_class = nx_class.decode()
-                definition = _entry_definition(entry)
-                if nx_class == "NXlauetof" or definition == "NXlauetof":
-                    return NXLAUETOF
-                if nx_class == "NXsnsevent" or definition == "NXsnsevent":
-                    return NXSNSEVENT
-                if definition == "TOFRAW":
-                    return TOFRAW
-                if _has_event_data(entry):
-                    # Raw data does not always declare an application
-                    # definition, so fall back on whether it holds events.
-                    if _instrument_name(entry) == "MANDI":
-                        return NXSNSEVENT
-                    return TOFRAW
-    except OSError:
-        # Not an HDF5 file at all
-        return UNKNOWN
-    except KeyError:
-        return UNKNOWN
-    return UNKNOWN
+        scope = importlib.import_module(module).phil_scope
+    except (ImportError, AttributeError) as e:
+        raise ValueError(f"Could not ask {module} which methods it offers: {e}")
+    definition = scope.get(path).objects[0]
+    # A choice marks its default with a leading asterisk
+    return tuple(word.value.lstrip("*") for word in definition.words)
+
+
+def indexing_methods() -> tuple[str, ...]:
+    """The indexing methods dials.index offers."""
+    return _program_choices("dials.command_line.index", "indexing.method")
+
+
+def integration_methods() -> tuple[str, ...]:
+    """The integration methods dials.tof_integrate offers."""
+    return _program_choices("dials.command_line.tof_integrate", "method")
+
+
+def _format_class(filename: pathlib.Path):
+    """The dxtbx format class that claims a file, or None if none does."""
+    from dxtbx.format.Registry import get_format_class_for_file
+
+    try:
+        return get_format_class_for_file(os.fspath(filename))
+    except Exception:
+        return None
+
+
+def readable_images(filename: pathlib.Path) -> int:
+    """
+    How many images dxtbx can read from a file, or zero if it cannot read it.
+    """
+    format_class = _format_class(filename)
+    if format_class is None:
+        return 0
+    try:
+        return int(format_class(os.fspath(filename)).get_num_images())
+    except Exception:
+        return 0
+
+
+def check_inputs_readable(file_input: FileInput) -> None:
+    """
+    Stop before any work if dials.import can not read an input file.
+    """
+    unreadable = []
+    for image in file_input.images:
+        path = pathlib.Path(image)
+        if not path.is_file():
+            raise FileNotFoundError(
+                errno.ENOENT, os.strerror(errno.ENOENT), os.fspath(path)
+            )
+        if not readable_images(path):
+            unreadable.append(image)
+    if unreadable:
+        raise ValueError(
+            "dials.import cannot read "
+            + ", ".join(unreadable)
+            + ". Raw event data has to be reduced to time-of-flight bins"
+            " before this pipeline can process it."
+        )
 
 
 @dataclass
@@ -670,41 +150,6 @@ class FileInput:
                 " only used to correct the incident spectrum, so both are needed."
             )
         return file_input
-
-
-@dataclass
-class BinningParams:
-    enabled: bool | AutoType = Auto
-    index_bins: int = 50
-    integrate_bins: int = 200
-    min_time_bin: float | None = None
-    max_time_bin: float | None = None
-    time_bin_unit: str = "us"
-    detector_ids: list[int] | None = None
-    tof_padding: float = 100.0
-    essnmx_reduce: pathlib.Path | None = None
-    extra_args: list[str] = field(default_factory=list)
-
-    @property
-    def single_reduction(self) -> bool:
-        """Whether one reduction serves both indexing and integration."""
-        return self.index_bins == self.integrate_bins
-
-    @classmethod
-    def from_phil(cls, params: iotbx.phil.scope_extract) -> BinningParams:
-        binning = params.binning
-        return cls(
-            binning.enabled,
-            binning.index_bins,
-            binning.integrate_bins,
-            binning.min_time_bin,
-            binning.max_time_bin,
-            binning.time_bin_unit,
-            list(binning.detector_ids) if binning.detector_ids else None,
-            binning.tof_padding,
-            _resolved_file(binning.essnmx_reduce),
-            [arg for arg in binning.extra_args if arg],
-        )
 
 
 @dataclass
@@ -771,11 +216,12 @@ class IndexingParams:
             raise ValueError(
                 "No indexing method given (set indexing.method or indexing.ladder)"
             )
+        available = indexing_methods()
         for method in methods:
-            if method not in INDEXING_METHODS:
+            if method not in available:
                 raise ValueError(
-                    f"Unknown indexing method {method}."
-                    f" Choose from {', '.join(INDEXING_METHODS)}"
+                    f"dials.index has no indexing method {method}."
+                    f" It offers {', '.join(available)}"
                 )
 
         max_cell = indexing.max_cell
@@ -812,6 +258,7 @@ class IntegrationParams:
     min_profile_fraction: float = 0.5
     integration_type: str = "observed"
     calculated_d_min: float | None = None
+    max_predicted: int = 250000
     background_model: str = "linear3d"
     mask: str = "both"
     mask_metric: str = "i_over_sigma"
@@ -819,7 +266,6 @@ class IntegrationParams:
     wavelength_range: tuple[float, float] | None = None
     bbox_tof_padding: int = 2
     bbox_xy_padding: int = 1
-    lorentz: bool = False
     incident_run: pathlib.Path | None = None
     empty_run: pathlib.Path | None = None
     absorption: dict[str, float] | None = None
@@ -831,17 +277,27 @@ class IntegrationParams:
         cls, params: iotbx.phil.scope_extract, file_input: FileInput
     ) -> IntegrationParams:
         integration = params.integration
-        if integration.method not in INTEGRATION_METHODS:
+        available = integration_methods()
+        if integration.method not in available:
             raise ValueError(
-                f"Unknown integration method {integration.method}."
-                f" Choose from {', '.join(INTEGRATION_METHODS)}"
+                f"dials.tof_integrate has no integration method"
+                f" {integration.method}. It offers {', '.join(available)}"
             )
-        if integration.integration_type == "calculated" and not (
-            integration.calculated_d_min
+        # phil reads the bare word none as None for a str parameter
+        fallback_method = integration.fallback_method or NO_FALLBACK
+        if fallback_method not in available + (NO_FALLBACK,):
+            raise ValueError(
+                f"integration.fallback_method {fallback_method} is"
+                f" neither {NO_FALLBACK} nor one of the methods"
+                f" dials.tof_integrate offers ({', '.join(available)})"
+            )
+        if (
+            integration.calculated_d_min is not None
+            and integration.calculated_d_min <= 0
         ):
             raise ValueError(
-                "integration.calculated_d_min must be set when"
-                " integration.integration_type=calculated"
+                "integration.calculated_d_min must be a positive resolution in"
+                " Angstrom, or None to use the limit the geometry allows"
             )
 
         absorption = None
@@ -865,10 +321,11 @@ class IntegrationParams:
 
         return cls(
             integration.method,
-            integration.fallback_method,
+            fallback_method,
             integration.min_profile_fraction,
             integration.integration_type,
             integration.calculated_d_min,
+            integration.max_predicted,
             integration.background_model,
             integration.mask,
             integration.mask_metric,
@@ -876,7 +333,6 @@ class IntegrationParams:
             wavelength_range,
             integration.bbox_tof_padding,
             integration.bbox_xy_padding,
-            integration.lorentz,
             file_input.vanadium_run,
             file_input.empty_run,
             absorption,
@@ -988,7 +444,6 @@ class LaueTOFSetup:
     """The fully resolved input of a run, as processed from the phil scope."""
 
     file_input: FileInput
-    binning_params: BinningParams
     spotfinding_params: SpotfindingParams
     indexing_params: IndexingParams
     integration_params: IntegrationParams
@@ -996,65 +451,13 @@ class LaueTOFSetup:
     pointless_params: PointlessParams
     lawless_params: LawlessParams
     options: AlgorithmParams
-    # Input file class, keyed on the image path, for files given with image=
-    input_classes: dict[str, str] = field(default_factory=dict)
-
-    @property
-    def files_to_bin(self) -> list[str]:
-        """The input files that must be reduced before dials.import can read them."""
-        if self.binning_params.enabled is False:
-            return []
-        if self.binning_params.enabled is True:
-            return list(self.input_classes)
-        return [
-            filename
-            for filename, file_class in self.input_classes.items()
-            if file_class in (TOFRAW, NXSNSEVENT)
-        ]
-
-
-def _classify_file_input(file_input: FileInput) -> dict[str, str]:
-    """Identify the data type of each input file given with image=."""
-    input_classes = {}
-    for image in file_input.images:
-        path = pathlib.Path(image)
-        if not path.is_file():
-            raise FileNotFoundError(
-                errno.ENOENT, os.strerror(errno.ENOENT), os.fspath(path)
-            )
-        input_classes[image] = classify_input(path)
-    return input_classes
 
 
 def _log_setup(setup: LaueTOFSetup) -> None:
     """Report what was resolved from the phil scope, before any work is done."""
-    for filename, file_class in setup.input_classes.items():
-        if file_class == NXLAUETOF:
-            detail = "already TOF binned"
-        elif file_class in (TOFRAW, NXSNSEVENT):
-            detail = f"raw data ({file_class}), needs reducing"
-        else:
-            detail = "not a binnable NeXus file, will be imported as given"
-        xia2_logger.info(f"Input {filename}: {detail}")
-
-    to_bin = setup.files_to_bin
-    binning = setup.binning_params
-    if "bin" not in setup.options.steps:
-        if to_bin:
-            xia2_logger.warning(
-                f"{len(to_bin)} input file(s) hold raw data, but the bin step is"
-                " switched off. dials.import is unlikely to be able to read them."
-            )
-    elif to_bin:
-        if binning.single_reduction:
-            xia2_logger.info(
-                f"Reducing {len(to_bin)} file(s) to {binning.index_bins} TOF bins"
-            )
-        else:
-            xia2_logger.info(
-                f"Reducing {len(to_bin)} file(s) to {binning.index_bins} TOF bins"
-                f" for indexing and {binning.integrate_bins} for integration"
-            )
+    for image in setup.file_input.images:
+        n_images = readable_images(pathlib.Path(image))
+        xia2_logger.info(f"Input {image}: {n_images} image(s)")
 
     indexing = setup.indexing_params
     if len(indexing.methods) > 1:
@@ -1082,12 +485,8 @@ def _log_setup(setup: LaueTOFSetup) -> None:
             " incident spectrum."
         )
     xia2_logger.info(
-        "TOF Lorentz correction will "
-        + (
-            "be applied during integration"
-            if integration.lorentz
-            else "be left to lawless (LORENTZ TOF), not applied during integration"
-        )
+        "The TOF Lorentz correction is applied during integration, per pixel,"
+        " which is the only place this pipeline can take it"
     )
     if integration.mask == "both":
         xia2_logger.info(
@@ -1099,10 +498,23 @@ def _log_setup(setup: LaueTOFSetup) -> None:
         + (
             ""
             if integration.method == "summation"
-            or integration.fallback_method == "none"
+            or not integration.fallback_method
+            or integration.fallback_method == NO_FALLBACK
             else f", falling back to {integration.fallback_method} if it fails"
         )
     )
+    if integration.integration_type == "calculated":
+        xia2_logger.info(
+            "Every predicted reflection will be integrated, to "
+            + (
+                f"{integration.calculated_d_min} A"
+                if integration.calculated_d_min
+                else "the limit the geometry allows"
+            )
+            + ", after a first pass over the observed spots (at most"
+            f" {integration.max_predicted} reflections, see"
+            " integration.max_predicted)"
+        )
 
 
 def setup_from_phil(params: iotbx.phil.scope_extract) -> LaueTOFSetup:
@@ -1111,9 +523,9 @@ def setup_from_phil(params: iotbx.phil.scope_extract) -> LaueTOFSetup:
         params.multiprocessing.nproc = CPU_COUNT
 
     file_input = FileInput.from_phil(params)
+    check_inputs_readable(file_input)
     setup = LaueTOFSetup(
         file_input=file_input,
-        binning_params=BinningParams.from_phil(params),
         spotfinding_params=SpotfindingParams.from_phil(params),
         indexing_params=IndexingParams.from_phil(params),
         integration_params=IntegrationParams.from_phil(params, file_input),
@@ -1121,7 +533,6 @@ def setup_from_phil(params: iotbx.phil.scope_extract) -> LaueTOFSetup:
         pointless_params=PointlessParams.from_phil(params),
         lawless_params=LawlessParams.from_phil(params),
         options=AlgorithmParams.from_phil(params),
-        input_classes=_classify_file_input(file_input),
     )
     _log_setup(setup)
     return setup
@@ -1135,7 +546,7 @@ def run_xia2_laue_tof(
     Run the Laue-TOF processing pipeline.
 
     Each crystal orientation is processed independently, in its own
-    subdirectory: reduce to TOF bins (if the input is not already binned),
+    subdirectory:
     import, find spots, index, refine and integrate.
     """
     setup = setup_from_phil(params)

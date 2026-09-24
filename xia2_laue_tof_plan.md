@@ -26,16 +26,30 @@ seeded (`known_orientation`), and the combine/export step writes
 and 2703 reflections, then `scale/dials.hkl` with **one SHELX batch per
 orientation** (1359 + 1344 reflections in batches 0 and 1).
 
-**Lorentz moved to lawless (2026-09-22):** `integration.lorentz` now defaults to
-`False` and lawless applies `LORENTZ TOF`. This is a workaround for a second
-DIALS defect, written up in `dials_tof_profile_1d_ibix_assert_issue.md` and not
-yet filed; nothing in DIALS was changed. See
-[Lorentz: exactly once](#lorentz-exactly-once).
+**Lorentz is always applied at integration (2026-09-22):** the phil option is
+gone; `corrections.lorentz=True` is hard-coded. The `lawless` branch in use has no
+`LORENTZ` keyword and aborts if given one, and the `sin^2(theta)` half of the
+factor is not something the normalisation can absorb. The `profile_1d_ibix` defect that made this
+painful is **fixed upstream by [#3281](https://github.com/dials/dials/pull/3281)**,
+built in on 2026-09-22: it bounds `A` by phil rather than by `1e4 * intensity_max`,
+and corrects the inverted FWHM guard, which lifts the fit fraction on config3 from
+11 % to 62 %. See [Lorentz: exactly once](#lorentz-exactly-once).
+
+**Binning removed (2026-09-23):** the `bin` step, the `binning` phil scope,
+`BinningParams`, `bin_run`, `histogram_mandi_run` and the file-classification
+machinery are gone. The pipeline now checks only that dxtbx can read each input -
+`readable_images()` asks the format class for an image count, which `understand()`
+cannot answer - and stops with an error naming any file it cannot. Raw event data
+has to be reduced before it is handed over. MANDI's in-place histogramming is what
+prompted this: binning and reading were two questions answered by one tangled
+check, and the MANDI route mutates the user's raw files. **To be re-added**, as a
+separate step that does not classify input on the pipeline's behalf; the old code
+is in the history at [Step 0](#step-0-new-tof-binning-with-essnmx).
 
 **Next, in order:**
 
-1. Integrate everything the geometry allows, not only the observed spots
-   (§ *Resolution: observed, then calculated*).
+1. ~~Integrate everything the geometry allows, not only the observed spots~~ -
+   done 2026-09-22, see § *Resolution: observed, then calculated*.
 2. Finish `tests/regression/test_laue_tof.py` (SXD, the converter unit test),
    then the docs.
 
@@ -111,16 +125,19 @@ two can be compared after scaling. Consequences, all implemented:
   is below 1e-4 therefore fails the check — the scale decides, not the data.
   The Lorentz correction is what puts it there, since `L = sin²θ/λ⁴` is applied
   per pixel *before* the projection and is ~1e-3 at neutron wavelengths, which
-  is why the correction now moves to lawless (see
-  [Lorentz: exactly once](#lorentz-exactly-once)). It kills the whole run, not
+  is why this pipeline always takes the correction at integration (see
+  [Lorentz: exactly once](#lorentz-exactly-once)). It killed the whole run, not
   one reflection, because the fit runs in a `ThreadPool` worker that catches
-  nothing, so the exception escapes the thread and terminates the process
-  without naming a reflection. Written up in
-  `dials_tof_profile_1d_ibix_assert_issue.md`, **not yet filed**; DIALS is not
-  patched. `integration.method` still defaults to `profile_1d_ibix` with
-  `fallback_method=summation`, and the fallback is remembered for the remaining
-  orientations instead of failing on each — with `lorentz=False` the method now
-  runs, so the fallback should be the exception rather than the rule.
+  nothing, so the exception escaped the thread and terminated the process
+  without naming a reflection.
+  **Fixed upstream by [#3281](https://github.com/dials/dials/pull/3281)**
+  (built in 2026-09-22), which bounds `A` by the new phil
+  `profile_1d_ibix.min_A`/`max_A` instead of `1e4 · intensity_max`, and corrects
+  an inverted guard that had left `estimate_sigma_from_fwhm` dead — that second
+  half lifts the fit fraction on config3 from 11 % to 62 %. The thread-pool
+  behaviour is untouched, so any other throw still takes the run with it.
+  `integration.method` defaults to `profile_1d_ibix` with
+  `fallback_method=summation`, which is now a guard rather than a routine path.
 - A profile run finishing is **not** the method working: `profile_3d_gutmann`
   completed on the same data but fitted **13 of 1359** reflections (~4 min,
   against 7 s for summation), leaving an `intensity.prf` column covering 1 % of
@@ -705,45 +722,42 @@ with the data through combine and into the MTZ, and refuses to combine
 orientations that disagree.
 
 
-`dials.tof_integrate corrections.lorentz` defaults to **False**; lawless `LORENTZ`
-defaults to **NONE** and *nothing infers it* — not even `PROBE NEUTRON`. So by
-default the Laue Lorentz factor is applied **nowhere**, and applying it twice is as
-wrong as not at all. Model this as a single xia2 knob:
+`dials.tof_integrate corrections.lorentz` defaults to **False** in DIALS, and the
+`lawless` branch now in use has **no `LORENTZ` keyword at all** - passing one aborts
+it (exit 134). So there is exactly one place the factor can be taken, and
+**xia2.laue_tof always takes it**: `corrections.lorentz=True` is hard-coded in the
+integrate step and the `integration.lorentz` phil option was removed on 2026-09-22.
+The `lorentz_applied` column is still stamped on every integrated file, and the
+combine, export and scale steps still check it, for data this pipeline did not
+produce.
 
-```
-lorentz.applied_by = *integrate | lawless | none
-```
+**Why here and not downstream (measured on MANDI CuZnSOD, 2026-09-22).** The
+factor is `sin^2(theta)/lambda^4`, and the two halves behave differently:
 
-- `integrate` → `dials.tof_integrate corrections.lorentz=True`, lawless
-  gets no `LORENTZ` keyword. Keeps the intermediate SHELX/MTZ physically correct
-  whatever is done downstream.
-- `lawless` (**default since 2026-09-22**) → integration left at
-  `corrections.lorentz=False`, lawless gets `LORENTZ TOF` (`I' = I·sin²θ/λ⁴`;
-  `LORENTZ LAUE` is `I'=I·sin²θ`, differing only in where the λ⁴ is booked — the
-  normalisation curve absorbs whichever is left in).
-- `none` → neither; for data already corrected upstream.
+- The `lambda^4` half is **degenerate with the wavelength normalisation** - lawless
+  says so itself in `mtz_unmerge_io.cpp` - so it makes no difference whether it is
+  applied or absorbed by `w(lambda)`. The MaNDi reduction leaves it in deliberately
+  (`mandi_createmtz.py:307` applies `1000*sin^2(theta)` only), which is why its
+  normalisation curve *rises* with wavelength where ours *falls*: the two are
+  complements, not rivals, and differ by `lambda^-5.25` on this data.
+- The `sin^2(theta)` half is **not** degenerate. It sets relative scale between
+  resolution shells, and nothing downstream supplies it.
 
-**Why lawless, not integrate (user, 2026-09-22):** `L` is applied per pixel
-*before* the profile projection, so it shrinks the numbers being fitted by two
-to three orders of magnitude, and `method=profile_1d_ibix` then aborts the whole
-run — `DIALS_ASSERT(A >= min_bounds[0] && A <= max_bounds[0])`, exit 134. The
-bound is `1e4 · intensity_max` in raw units against an `A` fixed at 1.0 in
-normalised units, so it is the *scale*, not the data, that decides. Verified on
-config3 (1508 reflections): `lorentz=True` aborts, `lorentz=False` integrates
-with CC(sum, prf) 0.98, and `method=summation lorentz=True` shows the
-intensities are finite and simply small (median 8.3e-4). Written up in
-`dials_tof_profile_1d_ibix_assert_issue.md`; **DIALS is not patched** — the
-pipeline works around it by leaving the correction to lawless.
+Per shell, applying it wins 12 of 20 shells and the outer shell (CC-half 0.500
+against 0.457). The *overall* CC-half looks worse (0.786 against 0.927) purely
+because the correction re-weights the shells and overall CC-half is computed
+across the whole dataset - a statistic artefact, not a loss.
 
-In the implementation this is `integration.lorentz` (now defaulting to `False`)
-plus the `lorentz_applied` column, which is what decides whether lawless is
-given `LORENTZ TOF`. A file without that column is now read as **not**
-corrected, matching both defaults. The SHELX export warns, since nothing applies
-the correction on that path.
+Two consequences of always applying it, both handled:
 
-Whichever is chosen, log the decision explicitly. Expect the overall R-merge to
-move a lot when the correction is on (re-weighting of resolution shells), while
-per-shell values stay put — that is not a loss of quality.
+- **Intensities land ~1e-3 of counts** (median 3.3e-4 on MANDI against 7.5e-2
+  without). `method=profile_1d_ibix` used to abort on that; #3281 fixed it. What
+  remains is **pointless failing outright** on numbers that small
+  (`NormaliseInRuns::apply Unused run 1`).
+- The unmerged-MTZ writer therefore scales `I`/`SIGI` (and `IPR`/`SIGIPR`) by a
+  power of ten to a counts-like median, logging the factor. A constant on both
+  columns is absorbed by the scale factors and changes no statistic; it is the
+  same guard as the `1000 *` in the MaNDi script.
 
 ## The output report
 
@@ -786,7 +800,7 @@ How it works out:
 - A failure writing the report is reported and does not fail the run: everything
   it describes is already on disk.
 
-## Resolution: observed now, calculated next
+## Resolution: observed, then calculated
 
 `integration_type=observed` integrates only the spots that were found and
 indexed, which on MANDI is a couple of hundred reflections of the tens of
@@ -822,19 +836,57 @@ d_min of the detector geometry):**
    with `RESOLUTION` costs nothing, where re-integrating costs everything, so the
    pipeline integrates wide once and cuts as often as it likes.
 
-Open points for the implementation:
+**Written 2026-09-22.** The open points were settled as follows:
 
-- Phil shape: `integration.expand = True/False` plus
-  `integration.expand_d_min = *geometric observed <float>`, or fold it into
-  `integration_type` with the d_min derived when it is `calculated`.
-- A cost guard (`integration.max_predicted`): 93 000 shoeboxes is a different
-  proposition from 1 359, and a large cell with an optimistic d_min could run for
-  hours. Predict first, log the count, refuse above the guard.
-- `integration.wavelength_range` should default to the TOF-derived band, so that
-  predictions outside what was recorded are dropped rather than integrated as
-  noise - particularly on MANDI, where the stated band is not the measured one.
-- Whether to keep the pass 1 output as a checkpoint (it is a strict subset) or
-  overwrite it.
+- **Phil shape: folded into `integration_type`.** No second switch. With
+  `integration_type=calculated` the limit is `integration.calculated_d_min` when
+  given and the geometric limit when not, so the common case needs one word.
+  `calculated_d_min` is no longer required (it used to be an error to leave it
+  unset), and a non-positive value is rejected up front.
+- **Both passes always run.** `integration_type=calculated` runs the observed
+  pass first, because that is what chooses the method and the mask - a mask
+  comparison over 93 000 predicted shoeboxes costs a hundred times what it does
+  over 1 359 - and then the calculated pass with those choices. The observed
+  output stays on disk under its own `integrated_<method>_<mask>.refl` name as a
+  checkpoint, and the log names it; the calculated output becomes
+  `integrated.refl`.
+- **The method the calculated pass ends on is the one the other orientations
+  use.** A profile method that survives the observed pass can still fail here,
+  where most shoeboxes hold no peak, so the fallback is taken once and
+  remembered rather than rediscovered on every orientation. Before #3281 this
+  fired on every calculated pass; it is now a guard against the mask and
+  thread-pool failures that remain.
+- **Profile fitting a calculated pass is not worth it on MANDI** (2026-09-22,
+  #3281 build). `profile_1d_ibix` fits 98.9-100 % of the observed spots but only
+  55-61 % of everything predicted, and lawless's own comparison then puts pure
+  profile at Rmeas 0.394 against summation's 0.311, choosing a combination that
+  beats summation by 0.001. End to end the summation run is better on every
+  statistic (Rmerge 0.291 vs 0.313, CC½ 0.786 vs 0.774, outer 0.500 vs 0.485).
+  lawless says why: 42 887 of the observations have no profile value, so the file
+  mixes two populations. `min_profile_fraction` does not catch this — 58 % passes
+  it. Use `method=summation` for calculated passes until the 1D profile
+  parameters have been tuned.
+- **Cost guard `integration.max_predicted` (default 250 000).** The count is
+  predicted with `TOFReflectionPredictor` before any shoebox is extracted - 1.7 s
+  for 93 000 - logged with the observed count beside it, and a run over the guard
+  stops with the d_min that would bring it under. That number is *found by
+  prediction*, not from `d^-3`: a Laue-TOF experiment does not record a sphere,
+  so the analytic estimate is optimistic (2.69 A against the true 3.31 A on
+  config1 for a 5 000 guard) and would have the user refused twice.
+- **The wavelength band defaults to the TOF-derived one** for the calculated pass
+  only. An observed reflection is inside the band by construction, having been
+  found in the data, so the observed pass is left exactly as it was; a predicted
+  one outside it cannot have been recorded and would be integrated as noise.
+  This is what protects MANDI, whose stated band (2.0-4.0 A) is not its measured
+  one (1.92-4.08 A).
+
+Verified on NMX config1: `calculated_d_min=2.5` predicts 9 970 reflections
+against the 1 359 observed and integrates 5 094 of them (the rest dropped as
+overlapping or out of range), 50 s for the run; at N=2 the second orientation
+goes straight to summation and combine gives 10 217 reflections in 2 batches.
+The default limit is 1.014 A here (1.016 A from the imported geometry, 1.014 A
+from the refined one) for 93 312 predicted, 69x the observed count. The observed
+path is unchanged: still 1 359 reflections.
 
 ## Files to add / modify
 
@@ -1194,10 +1246,11 @@ and with the CCP4 environment sourced for pointless/lawless.
    applied at integration the curve should be close to flat. Check χ² against
    resolution, intensity and batch; compare R-merge/CC½ with and without
    `LAUE NORM…` (run `LAMBDAONLY` for an isolated view of `w(λ)`).
-7. **Lorentz applied exactly once**: run with `lorentz.applied_by=integrate` and
-   `=lawless` and confirm merged intensities agree up to an overall wavelength-
-   dependent scale that the normalisation curve absorbs (per-shell statistics should
-   barely move; overall R-merge may move a lot — that is re-weighting, see above).
+7. ~~**Lorentz applied exactly once**~~ — done 2026-09-22 on MANDI CuZnSOD. Applying
+   it at integration, in lawless, and not at all were compared on the same 124 168
+   reflections: per-shell statistics move little, overall R-merge and CC½ move a lot,
+   and that is the re-weighting described above. The correction is now unconditional,
+   so there is nothing left to select between.
 8. **Indexing defaults**: on an NMX dataset (`~/ppase_allconfigs/configN/`),
    confirm the pipeline's default recipe reproduces the study's balanced pick to
    within noise — indexed count, indexed fraction and positional RMSD in the same

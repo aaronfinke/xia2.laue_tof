@@ -285,9 +285,7 @@ def lawless_keywords(
     The keyword lines for one lawless run.
 
     The wavelength range and the batch range come from the data unless they were
-    given. LORENTZ is written only when the correction has not already been
-    applied: the Laue Lorentz factor belongs in the data exactly once, and
-    lawless applies nothing unless asked, not even for PROBE NEUTRON.
+    given.
     """
     first, last = _batch_range(hklin)
     lam_min, lam_max = _wavelength_range(hklin)
@@ -316,7 +314,13 @@ def lawless_keywords(
     if params.normalisation != "none":
         keywords.append(f"LAUE NORMLAMREF {lam_ref:.3f}")
     if not lorentz_applied:
-        keywords.append("LORENTZ TOF")
+        xia2_logger.warning(
+            "These data do not carry the Lorentz correction and lawless cannot"
+            " apply it. The wavelength part of the factor will be absorbed by"
+            " the normalisation curve, but sin^2(theta) will not, so the merged"
+            " intensities will be mis-scaled between resolution shells."
+            " Reintegrate with integration.lorentz=True."
+        )
     if params.lambda_only:
         keywords.append("LAUE LAMBDAONLY")
     keywords.append("ANOMALOUS ON" if params.anomalous else "ANOMALOUS OFF")

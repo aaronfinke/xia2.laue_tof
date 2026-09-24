@@ -7,11 +7,10 @@ exposures at different orientations, each exposure a stack of TOF bins. Each
 orientation is processed independently: (bin) -> import -> find_spots -> index
 -> refine -> tof_integrate.
 
-With an already TOF-binned file (NXlauetof), run e.g.:
+The input has to be data dials.import can read, which for a time-of-flight
+experiment means it has already been binned; raw event data must be reduced
+before it is given to this pipeline, which stops with an error otherwise.
     xia2.laue_tof image=run_binned.h5 unit_cell=x space_group=y
-Raw event data (NMX TOFRAW, MANDI NXsnsevent) is reduced to TOF bins first, with
-essnmx, before importing:
-    xia2.laue_tof image=run_events.h5 binning.nbins=50
 Give one image= per crystal orientation, e.g.:
     xia2.laue_tof image=setting1.h5 image=setting2.h5 unit_cell=x space_group=y
 An incident (vanadium) run and an empty-instrument run are optional but
@@ -76,11 +75,13 @@ def run(args=sys.argv[1:]):
         with cleanup(cwd):
             run_xia2_laue_tof(cwd, params)
     except ValueError as e:
+        # Unlike xia2.ssx, which exits 0 here, a run that could not do what it
+        # was asked exits non-zero, so that a caller can tell
         xia2_logger.error(f"Error: {e}")
-        sys.exit(0)
+        sys.exit(1)
     except FileNotFoundError as e:
         xia2_logger.error(e)
-        sys.exit(0)
+        sys.exit(1)
     except Exception as e:
         with (cwd / "xia2-error.txt").open(mode="w") as fh:
             traceback.print_exc(file=fh)
