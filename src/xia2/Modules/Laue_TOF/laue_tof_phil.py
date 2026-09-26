@@ -30,6 +30,15 @@ mask = None
   .type = path
   .help = "A mask to use for spotfinding and integration"
   .expert_level = 1
+detector_calibration = None
+  .type = path
+  .help = "An ISAW/Mantid .DetCal file giving refined per-panel positions."
+          "Applied straight after import, so indexing, refinement and"
+          "integration all use the calibrated geometry. Without it the nominal"
+          "geometry can be wrong by several pixels per panel, which refinement"
+          "absorbs into the crystal orientation rather than correcting, leaving"
+          "per-panel residuals that no mask or profile model can recover from."
+  .expert_level = 1
 space_group = None
   .type = space_group
   .help = "Space group to be used for indexing and integration."

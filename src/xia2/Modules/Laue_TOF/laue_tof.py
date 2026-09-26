@@ -117,6 +117,7 @@ class FileInput:
     vanadium_run: pathlib.Path | None = None
     empty_run: pathlib.Path | None = None
     mask: pathlib.Path | None = None
+    detector_calibration: pathlib.Path | None = None
     import_phil: pathlib.Path | None = None
 
     def resolve_paths(self) -> None:
@@ -143,6 +144,7 @@ class FileInput:
         file_input.vanadium_run = _resolved_file(params.vanadium_run)
         file_input.empty_run = _resolved_file(params.empty_run)
         file_input.mask = _resolved_file(params.mask)
+        file_input.detector_calibration = _resolved_file(params.detector_calibration)
         file_input.import_phil = _resolved_file(params.dials_import.phil)
         if file_input.empty_run and not file_input.vanadium_run:
             raise ValueError(

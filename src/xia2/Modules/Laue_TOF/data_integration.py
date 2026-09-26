@@ -237,6 +237,75 @@ def _format_class_name(image: str) -> str:
     return format_class.__name__ if format_class else "none"
 
 
+def apply_detector_calibration(
+    experiments: pathlib.Path, detcal: pathlib.Path
+) -> None:
+    """
+    Replace the imported detector geometry with an ISAW/Mantid .DetCal one.
+
+    The nominal MANDI geometry places individual panels several pixels out.
+    Refinement does not correct that: with one detector group and many panels
+    it absorbs the error into the crystal orientation instead, which leaves
+    per-panel residuals that no mask or profile model can recover from.  On
+    13378 the calibration takes indexing from 222/329 reflections at a mean
+    residual of 3.28 px to 314/329 at 1.38 px, and agreement with Mantid's own
+    peak positions from 28.5 % to 74.4 % within 3 px.
+
+    Conventions: DetCal Base -> fast axis, Up -> slow axis, Center is the panel
+    midpoint in cm, and DETNUM matches the dxtbx panel named "bank<DETNUM>".
+    Base and Up are written to five decimals, so slow is re-orthogonalised
+    against fast before use.
+    """
+    import numpy as np
+
+    cal = {}
+    for line in detcal.read_text().splitlines():
+        f = line.split()
+        if len(f) >= 17 and f[0] == "5":
+            cal[int(f[1])] = (
+                float(f[4]) * 10.0,
+                float(f[5]) * 10.0,
+                np.array([float(f[8]), float(f[9]), float(f[10])]) * 10.0,
+                np.array([float(f[11]), float(f[12]), float(f[13])]),
+                np.array([float(f[14]), float(f[15]), float(f[16])]),
+            )
+    if not cal:
+        raise ValueError(f"No panel records (lines starting '5') in {detcal}")
+
+    expts = load.experiment_list(experiments, check_format=False)
+    detector = expts[0].detector
+    applied, missing, mismatched = 0, [], []
+    for panel in detector:
+        digits = "".join(c for c in panel.get_name() if c.isdigit())
+        if not digits or int(digits) not in cal:
+            missing.append(panel.get_name())
+            continue
+        width, height, centre, base, up = cal[int(digits)]
+        fast = base / np.linalg.norm(base)
+        slow = up - np.dot(up, fast) * fast
+        slow /= np.linalg.norm(slow)
+        if (
+            float(np.dot(fast, np.array(panel.get_fast_axis()))) < 0.9
+            or float(np.dot(slow, np.array(panel.get_slow_axis()))) < 0.9
+        ):
+            mismatched.append(panel.get_name())
+            continue
+        origin = centre - 0.5 * width * fast - 0.5 * height * slow
+        panel.set_frame(tuple(fast), tuple(slow), tuple(origin))
+        applied += 1
+    if mismatched:
+        raise ValueError(
+            f"{detcal.name} does not describe this detector: the axes of"
+            f" {len(mismatched)} panel(s) disagree by more than 25 deg, starting"
+            f" with {mismatched[0]}"
+        )
+    expts.as_file(experiments)
+    xia2_logger.info(
+        f"Applied detector calibration {detcal.name} to {applied} panel(s)"
+        + (f", {len(missing)} not in the file" if missing else "")
+    )
+
+
 def run_import(
     working_directory: pathlib.Path,
     image: str,
@@ -266,6 +335,9 @@ def run_import(
     _record_log(
         f"{working_directory.name} import", working_directory / "dials.import.log"
     )
+
+    if file_input.detector_calibration:
+        apply_detector_calibration(experiments, file_input.detector_calibration)
 
     expts = load.experiment_list(experiments, check_format=False)
     if not expts.all_tof():
