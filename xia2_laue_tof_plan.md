@@ -1,13 +1,21 @@
 # xia2.laue_tof — neutron Laue time-of-flight processing pipeline
 
-## Status (2026-09-21)
+## Status (2026-10-08)
+
+The pipeline runs end to end — import → find_spots → index → refine →
+tof_integrate → combine → export → unmerged MTZ → pointless → lawless → report.
+What is left is tuning, tests and docs, not structure.
 
 **Written and working** (all lint/format/mypy clean, verified on real data):
 
 | file | what it is |
 |---|---|
-| `src/xia2/Modules/Laue_TOF/laue_tof.py` | phil scope, the `*Params` dataclasses with `from_phil`, `classify_input`, `setup_from_phil`, `run_xia2_laue_tof` |
-| `src/xia2/Modules/Laue_TOF/data_integration.py` | the step functions: `bin_run`, `run_import`, `find_spots`, `index`, `refine`, `integrate`, `combine`, `export_shelx`, `process_exposure`, `run_data_integration` |
+| `src/xia2/Modules/Laue_TOF/laue_tof.py` | the `*Params` dataclasses with `from_phil`, `classify_input`, `setup_from_phil`, `run_xia2_laue_tof` |
+| `src/xia2/Modules/Laue_TOF/laue_tof_phil.py` | the phil scope, split out of `laue_tof.py`: top level, `spotfinding{}`, `indexing{}`, `integration{}`, `output{}`, `scaling{}` |
+| `src/xia2/Modules/Laue_TOF/data_integration.py` | the step functions: `run_import`, `find_spots`, `index`, `refine`, `integrate`, `combine`, `export_shelx`, `unmerged_mtz`, `process_exposure`, `run_data_integration` |
+| `src/xia2/Modules/Laue_TOF/laue_tof_mtz.py` | the unmerged Laue MTZ writer and `validate_unmerged_mtz` / `check_wavelength_column` |
+| `src/xia2/Modules/Laue_TOF/laue_tof_scale.py` | the pointless and lawless steps, version detection, the lawless XML reader |
+| `src/xia2/Modules/Laue_TOF/laue_tof_report.py` | the `report` step, in xia2's own report format |
 | `src/xia2/Modules/Laue_TOF/util.py` | `report_timing` (copied, not imported from SSX — nothing here may depend on `xia2.Modules.SSX`) |
 | `src/xia2/cli/laue_tof.py` | the `xia2.laue_tof` command: `ArgumentParser` / `setup_logging` / `cleanup` / `write_citations`, mirroring `cli/ssx.py`. Registered in `setup.py` as `xia2.laue_tof=xia2.cli.laue_tof:run` |
 
@@ -26,14 +34,19 @@ seeded (`known_orientation`), and the combine/export step writes
 and 2703 reflections, then `scale/dials.hkl` with **one SHELX batch per
 orientation** (1359 + 1344 reflections in batches 0 and 1).
 
-**Lorentz is always applied at integration (2026-09-22):** the phil option is
-gone; `corrections.lorentz=True` is hard-coded. The `lawless` branch in use has no
-`LORENTZ` keyword and aborts if given one, and the `sin^2(theta)` half of the
-factor is not something the normalisation can absorb. The `profile_1d_ibix` defect that made this
-painful is **fixed upstream by [#3281](https://github.com/dials/dials/pull/3281)**,
-built in on 2026-09-22: it bounds `A` by phil rather than by `1e4 * intensity_max`,
-and corrects the inverted FWHM guard, which lifts the fit fraction on config3 from
-11 % to 62 %. See [Lorentz: exactly once](#lorentz-exactly-once).
+**Lorentz is always applied at integration** — settled in `d62b2300`
+(2026-09-24), which hard-codes `corrections.lorentz=True` and removes the phil
+option. This **reverses `589b452f`** (2026-09-22, *"Leave the Lorentz correction
+to lawless"*), so read that commit as a snapshot, not as the design: the
+`lawless` branch in use has no `LORENTZ` keyword and aborts if given one, and the
+`sin^2(theta)` half of the factor is not something the normalisation can absorb.
+The `profile_1d_ibix` defect that made this painful is **fixed upstream by
+[#3281](https://github.com/dials/dials/pull/3281)**: it bounds `A` by the phil
+`profile_1d_ibix.min_A`/`max_A` rather than by `1e4 * intensity_max`, and
+corrects the inverted FWHM guard, which lifts the fit fraction on config3 from
+11 % to 62 %. **That fix is in `dials-dev`, not in the `dials-v3-30-0`
+checkout** — see *Environment* below, where getting this wrong cost a session.
+See [Lorentz: exactly once](#lorentz-exactly-once).
 
 **Binning removed (2026-09-23):** the `bin` step, the `binning` phil scope,
 `BinningParams`, `bin_run`, `histogram_mandi_run` and the file-classification
@@ -46,12 +59,41 @@ check, and the MANDI route mutates the user's raw files. **To be re-added**, as 
 separate step that does not classify input on the pipeline's behalf; the old code
 is in the history at [Step 0](#step-0-new-tof-binning-with-essnmx).
 
+**Landed since this section was last written (2026-09-21):**
+
+| commit | date | what |
+|---|---|---|
+| `589b452f` | 09-22 | Lorentz to lawless — **reversed by `d62b2300`**, see above |
+| `d62b2300` | 09-24 | integrate to the geometric limit; stop guessing about input; Lorentz hard-coded back on |
+| `000554d0` | 09-26 | apply an ISAW `.DetCal` detector calibration at import |
+| `bef929bd` | 10-08 | expert levels in the phil help |
+
 **Next, in order:**
 
-1. ~~Integrate everything the geometry allows, not only the observed spots~~ -
+1. ~~Integrate everything the geometry allows, not only the observed spots~~ —
    done 2026-09-22, see § *Resolution: observed, then calculated*.
-2. Finish `tests/regression/test_laue_tof.py` (SXD, the converter unit test),
-   then the docs.
+2. **Give `indexing.max_cell` a real default.** The single highest-yield fix
+   outstanding, and the plan already called for it — see § *Indexing defaults*,
+   where the study's own conclusion is that *every* difficult-layout success
+   used a fixed value. The code derives one only from a user-supplied
+   `unit_cell` (`laue_tof.py:229`); with no cell it falls through to the DIALS
+   nearest-neighbour estimate, which the comment immediately above it calls
+   unreliable. Measured cost on rubredoxin, 2026-10-08 (below).
+3. Build the rest of the **retry ladder and the acceptance ranking** that
+   § *Indexing defaults* specifies and the code does not: vary threshold
+   algorithm and `min_spot_size` as well as `method`, and rank accepted
+   solutions on the geometric mean of indexed count, indexed fraction and RMSD
+   rather than on RMSD alone (`data_integration.py:653`).
+4. **Process all exposures of one run together** (user, 2026-10-08): hand the
+   whole set to the DIALS steps rather than one exposure at a time, with
+   `joint_indexing=false` in `dials.index`, so that orientation plays no part
+   in indexing — these are stationary exposures, not a rotation scan. Make
+   `refinement.parameterisation.detector.panels=hierarchical` the `dials.refine`
+   default at the same time. Not started.
+5. Finish `tests/regression/test_laue_tof.py` (SXD, the converter unit test),
+   then the docs. Still 3 tests, all gated on a MANDI file that may not be
+   present; `doc/sphinx/` has no laue_tof page at all.
+6. Re-add TOF binning as a separate step (above).
 
 **The scaling tail is written** (2026-09-21): `laue_tof_scale.py`, wired in as
 the `pointless` and `lawless` workflow steps, with the `scaling{}` phil scope.
@@ -289,13 +331,75 @@ two can be compared after scaling. Consequences, all implemented:
   `i = int(panel_name[-1])` into a three-entry NMX dict and raises
   `KeyError: 2`. Fix that in essnmx before returning to that route.)
 
-**Not started**: everything in *Wavelength normalisation and scaling*, which was
-deliberately deferred — the module deals only with binning and the DIALS steps.
+**Rubredoxin (ESS NMX simulation), 2026-10-08** — the first dataset run since
+the move to `dials-dev`, and the case that showed `max_cell` has to be fixed.
+`rubr_splitbeamstop_mosaicity/.../5e11_x11000SPLIT_x10_mosaicity_18545527/0/scipp_output.h5`,
+`FormatESSNMX`, 3 panels, 100 TOF bins, 1.87–3.54 Å, geometric `d_min` 1.051 Å.
+
+- **The nearest-neighbour `max_cell` estimate halved the cell.** It returned
+  **23.3 Å** against a true longest axis of **44.1 Å**, so the basis search
+  truncated and `a` came back as 17.2 instead of 34.4. The correct cell was *in*
+  the candidate list, indexing 100 % of the centroids, and lost on volume score
+  to the halved one at 69 %. Any fixed value ≥ 45 Å gives
+  **34.4 35.3 44.1 · 90 90 90**, with the volume exactly doubled (26 749 →
+  53 590); `fft3d`, `fft1d` and a known-symmetry run all agree, and **P 21 21 21**
+  refines cleanly at 0.46 px. Indexed 273/872 (31.3 %) → **486/872 (55.7 %)**.
+- **`d_min_start = 4.0` starves the FFT**: 75 centroids of 872, against 428 at
+  2.0. The indexed count barely moves (484–486) but the median residual does —
+  **0.60 px → 0.45 px**. 5.0 fails outright. Worth lowering the default, though
+  the NMX study chose 4.0 for the difficult layouts, so check both before
+  changing it.
+- **A low indexed fraction is not automatically a bad solution, and the
+  acceptance test cannot tell the difference.** Per macrocycle: 97.2 % indexed
+  at `d_min` 2.00, 98.7 % at 1.83, 93.3 % at 1.66, 73.8 % at 1.49, 55.7 % at
+  1.32. The lattice explains ~98 % of everything above 1.8 Å; the 386 spots it
+  never indexes are a separate population — d 1.37–1.73 Å, 2θ **101–134°**,
+  median I **63** against 174 for the indexed, and **all of them on the two side
+  panels** (the forward panel indexes 136/136). Weak backscattering junk through
+  the size filter, not a lattice problem. So `min_indexed_fraction` (0.25) is
+  being judged against a polluted denominator — another reason to rank on more
+  than one number (item 3 above).
+- **`spotfinding.d_min` and `d_max` cannot work on TOF data.** The obvious way
+  to drop that junk crashes in `dials.find_spots`: both options route through
+  `dials/util/masking.py::_apply_resolution_mask` → `ResolutionMaskGenerator`,
+  which needs a fixed `s0`, and a `PolychromaticBeam` has none —
+  `RuntimeError: PolychromaticBeam has no fixed s0`, `beam.h(741)`. The two
+  options are therefore dead as written (`laue_tof_phil.py:46`). A pixel mask is
+  the wrong mechanism; this has to be a filter in reflection space, or the
+  options should go.
+- **Payoff, whole pipeline**, with `indexing.max_cell=60 indexing.d_min_start=2.0`:
+  reflections integrated **193 → 374**, I/σ 19.4 → 21.1, RMSD 0.59 → 0.45 px.
 
 **Environment**: `.venv/` in this repo is the interpreter for all of it — see
 [Environment](#environment-and-external-programs) below. `dials_known_orientation_centred_cell_issue.md`
 in the repo root is a ready-to-file DIALS bug report, with
 `dials_known_orientation_fix_check.py` as its verification script.
+
+**The DIALS build moved to `dials-dev` (2026-10-08).** `.venv` was rebuilt on
+`/Users/aaronfinke/dials/dials-dev/conda_base` (python 3.13.15, branch
+`tof-profile-1d-mantid`, `7e37c2844`); the old one is kept as
+`.venv.old-v3-30-0`. What forced it, and the trap to remember:
+
+- **`dials-v3-30-0` is a broken install.** Its working tree is clean at `main`
+  (`14f881d4a`), where `TOFProfile1DIBIXParams` takes 7 doubles and
+  `tof_integrate.py:518` passes 7 — but `build/lib/dials_algorithms_tof_integration_ext.so`
+  was compiled from the 8-double source of #3281 and still wants 8. So
+  `method=profile_1d_ibix` dies in Boost.Python with a bare
+  `__init__(_object*, double × 8, int, bool, bool)` and the run falls back to
+  summation. **A stale `.so` against a reverted checkout reads exactly like a
+  bug in this pipeline.** Either rebuild that tree's extensions or do not use it.
+- xia2 resolves every DIALS program with `shutil.which` (`data_integration.py:121`),
+  so **whatever is on `$PATH` wins** regardless of which python the venv runs.
+  `export PATH=/Users/aaronfinke/dials/dials-dev/conda_base/bin:$PATH` is still
+  required — `.venv/bin` holds no DIALS dispatchers.
+- No editable `dxtbx` install this time: `dials-dev/conda_base` already resolves
+  `dxtbx` to `dials-dev/modules/dxtbx/src`, so the old venv's
+  `_editable_impl_dxtbx.pth` was redundant. numpy stayed at the DIALS build's
+  **2.4.6** (installed under a constraint); `.venv/share/cctbx` and
+  `.venv/bin/pytest` were remade by hand, as they must be after any rebuild.
+- `dials-dev` also offers a method `dials-v3-30-0` does not:
+  **`profile_1d_mantid`**. `integration.method` is a free string, not a phil
+  choice, so it is already selectable — untested here.
 
 ## Context
 
@@ -307,8 +411,8 @@ wavelength is derived from its arrival time, the beam is a `PolychromaticBeam`,
 and intensities must be normalised by an incident spectrum (vanadium) and
 corrected for background (empty run) and absorption.
 
-DIALS 3.30 (the tested dev environment at `/Users/aaronfinke/dials/dials-v3-30-0`,
-into which this xia2 fork is built as `modules/xia2`) already provides the complete
+DIALS (the tested dev environment at `/Users/aaronfinke/dials/dials-dev`, reached
+through this repo's `.venv`) already provides the complete
 TOF toolchain — this task wires those tools into a single xia2 command so a user
 can go from raw images to combined/exported intensities in one call. The final
 **wavelength normalisation, scaling and merging** stage is done by two CCP4-side
@@ -379,7 +483,7 @@ lawless   HKLIN sorted.mtz   HKLOUT scaled.mtz   (PROBE NEUTRON, LAUE NORMGPR ..
   (the CCP4-9 build drops the wavelength column, which makes `LAUE` fatal in
   lawless); lawless is not in CCP4 at all yet. Both are PHIL-configurable paths.
 
-## DIALS building blocks (all present in 3.30, verified)
+## DIALS building blocks (all verified present; originally against 3.30)
 
 - **Import / formats**: `FormatISISSXD`, **`FormatMANDI`**, **`FormatESSNMX`**
   produce an `ImageSequence` (images = TOF bins) with `PolychromaticBeam` +
@@ -1138,25 +1242,38 @@ orientation is one experiment, not thousands of stills).
   physics justifies (usually too many GP training bins). Open question to settle on
   real data: whether it is better to skip the vanadium correction at integration
   and let lawless fit the whole spectrum. Both paths should remain available.
-- **Environment**: must run against the tested **DIALS 3.30** build at
-  `/Users/aaronfinke/dials/dials-v3-30-0` (currently `v3.dev-1508-gb78e3bffe`); this
-  is also the build the NMX indexing study was made with. Its `modules/xia2` is
-  upstream xia2 on `main`, **not** this fork — install the `xia2N` checkout editable
-  into that environment (or point `modules/xia2` at it) before testing. The
-  Phenix-2.1 bundled DIALS lacks `dials.tof_integrate` and the TOF formats — do not
-  use it. The repo's `.venv` (DIALS conda python + `--system-site-packages`) carries
-  the fork, DIALS 3.30 and **essnmx/essreduce editable plus the scipp stack**, so
-  all three toolchains are importable and on PATH from one interpreter.
+- **Environment**: runs against **`dials-dev`** since 2026-10-08 —
+  `/Users/aaronfinke/dials/dials-dev`, branch `tof-profile-1d-mantid`
+  (`7e37c2844`), which is what `.venv` is now built on. It carries #3281, so
+  `profile_1d_ibix` works; `dials-v3-30-0` does not, and its build is stale
+  against its own source (see *Status* → *The DIALS build moved to `dials-dev`*).
+  Note the NMX indexing study was made with 3.30, so its numbers are not
+  strictly like-for-like any more. Each tree's `modules/xia2` is upstream xia2 on
+  `main`, **not** this fork — the fork reaches the interpreter through `.venv`'s
+  editable install, which shadows it. The Phenix-2.1 bundled DIALS lacks
+  `dials.tof_integrate` and the TOF formats — do not use it. The repo's `.venv`
+  (DIALS conda python + `--system-site-packages`) carries the fork and
+  **essnmx/essreduce editable plus the scipp stack**, so all three toolchains are
+  importable from one interpreter — but **not** on `$PATH`: the DIALS dispatchers
+  still need exporting, since every step is found with `shutil.which`.
 - **essnmx availability**: reduction pulls in the scipp stack (scipp, scippnexus,
   sciline, essreduce, tof, plopp, dask), which is a much heavier dependency than
   anything else xia2 needs. Keep it **optional and lazily invoked** — a missing
   `essnmx-reduce` must only fail runs whose input actually needs binning, with a
   message saying which file and why, never a run given NXlauetof input.
-- **Indexing without a known cell**: works for many Laue-TOF cases in DIALS 3.30;
+- **Indexing without a known cell**: works for many Laue-TOF cases;
   keep `indexing.method` (e.g. `pink_indexer`) exposed as a fallback for hard cases.
   Supplying `unit_cell`+`space_group` remains the most robust path — and note that
   every difficult-layout success in the NMX study also needed a **fixed
   `max_cell`**, which without a known cell has to come from the user.
+  **No longer only a risk: this is now a measured failure.** On rubredoxin
+  (2026-10-08, see *Status*) the nearest-neighbour estimate came back at 23.3 Å
+  for a 44.1 Å axis and returned a halved cell that passed every acceptance
+  check — right space group, 0.59 px residual, 31 % indexed — so nothing in the
+  pipeline flagged it. **Silently trusting the estimate is worse than having no
+  default**, because the wrong answer looks like a good one. At minimum, compare
+  the accepted cell's longest axis against the estimate that was used and warn
+  when it exceeds it; that one test would have caught this.
 - **Some geometries never autoindex.** config7 and config9 produced nothing in 480
   and 330 de-novo trials, including transfers of the recipes that cracked their
   near-identical sibling — a property of what those layouts record, not of the
@@ -1178,7 +1295,7 @@ conda python with `--system-site-packages`:
 
 ```
 source .venv/bin/activate
-export PATH=/Users/aaronfinke/dials/dials-v3-30-0/conda_base/bin:$PATH
+export PATH=/Users/aaronfinke/dials/dials-dev/conda_base/bin:$PATH
 ```
 
 The second line matters: `.venv/bin` holds the `xia2.*` scripts but **not** the
@@ -1188,7 +1305,8 @@ $PATH"*.
 
 | what | where |
 |---|---|
-| DIALS 3.30 | `/Users/aaronfinke/dials/dials-v3-30-0` (`v3.dev-1508-gb78e3bffe`) |
+| DIALS (in use) | `/Users/aaronfinke/dials/dials-dev` — branch `tof-profile-1d-mantid`, `7e37c2844`, banner `3.dev.1533`. Has #3281, so `profile_1d_ibix` works, and adds `profile_1d_mantid` |
+| DIALS 3.30 (**do not use**) | `/Users/aaronfinke/dials/dials-v3-30-0` — `main` at `14f881d4a`, but its built extensions are from a newer source, so `profile_1d_ibix` fails a Boost.Python signature check. The build the NMX indexing study was made with |
 | essnmx / essreduce | `/Users/aaronfinke/ess/packages/` (editable installs; scipp stack from PyPI, numpy pinned to the DIALS 2.4.6 so the compiled extensions keep working) |
 | xia2 (this fork) | editable install, so `xia2.*` console scripts run this tree, not the DIALS tree's `modules/xia2` |
 | pointless 1.16.1 | `/Users/aaronfinke/pointless/pointless` |
@@ -1197,16 +1315,27 @@ $PATH"*.
 
 Two things in the venv are hand-made and will not survive recreating it:
 `.venv/share/cctbx` is a symlink to the DIALS `conda_base/share/cctbx` (without
-it `libtbx.load_env` raises `FileNotFoundError`), and `.venv/bin/pytest` is a
-shim that runs this venv's interpreter (otherwise a `pytest` from another conda
-env on `$PATH` wins). `ruff` is not installed in the venv; the one used so far is
+it `libtbx.load_env` raises `FileNotFoundError`, because libtbx looks under
+`sys.prefix`, which in a venv is the venv), and `.venv/bin/pytest` is a shim that
+runs this venv's interpreter (otherwise a `pytest` from another conda env on
+`$PATH` wins). Both were remade on the 2026-10-08 rebuild. `ruff` is not
+installed in the venv; the one used so far is
 `/Users/aaronfinke/miniforge3/envs/nmx_strategy/bin/ruff`.
+
+To rebuild `.venv` against a different DIALS tree: create it from that tree's
+`conda_base/bin/python` with `--system-site-packages`, remake the two pieces
+above, then `pip install -e .` for this fork and `-e` the two `ess/packages`
+(which pull the scipp stack in as dependencies) — all **under a
+`numpy==<the DIALS build's version>` constraint**, or pip will move numpy and the
+compiled DIALS extensions stop loading. An editable `dxtbx` install is not
+needed if the tree's `conda_base` already resolves `dxtbx` to its own
+`modules/dxtbx/src`.
 
 ## Verification
 
-Run everything in the DIALS 3.30 conda env
-(`/Users/aaronfinke/dials/dials-v3-30-0`), with xia2N installed editable into it,
-and with the CCP4 environment sourced for pointless/lawless.
+Run everything in the `dials-dev` conda env
+(`/Users/aaronfinke/dials/dials-dev`), through this repo's `.venv`, and with the
+CCP4 environment sourced for pointless/lawless.
 
 1. **Smoke**: `dials.tof_integrate -h` and `xia2.laue_tof -h` both succeed;
    `python -c "import xia2.cli.laue_tof"`; `/Users/aaronfinke/pointless/pointless -i`
