@@ -91,12 +91,11 @@ is in the history at [Step 0](#step-0-new-tof-binning-with-essnmx).
    algorithm and `min_spot_size` as well as `method`, and rank accepted
    solutions on the geometric mean of indexed count, indexed fraction and RMSD
    rather than on RMSD alone (`data_integration.py:653`).
-4. **Process all exposures of one run together** (user, 2026-10-08): hand the
-   whole set to the DIALS steps rather than one exposure at a time, with
-   `joint_indexing=false` in `dials.index`, so that orientation plays no part
-   in indexing — these are stationary exposures, not a rotation scan. Make
-   `refinement.parameterisation.detector.panels=hierarchical` the `dials.refine`
-   default at the same time. Not started.
+4. ~~Process all exposures of one run together~~ — done 2026-10-08. The whole
+   set now goes to each DIALS program at once, in one `run/` directory instead
+   of one `orientation_N/` per exposure, and `dials.refine` always gets
+   `detector.panels=hierarchical`. See § *One run, processed together* below
+   for what that required.
 5. Finish `tests/regression/test_laue_tof.py` (SXD, the converter unit test),
    then the docs. Still 3 tests, all gated on a MANDI file that may not be
    present; `doc/sphinx/` has no laue_tof page at all.
@@ -376,6 +375,73 @@ the move to `dials-dev`, and the case that showed `max_cell` has to be fixed.
   options should go.
 - **Payoff, whole pipeline**, with `indexing.max_cell=60 indexing.d_min_start=2.0`:
   reflections integrated **193 → 374**, I/σ 19.4 → 21.1, RMSD 0.59 → 0.45 px.
+
+### One run, processed together (2026-10-08)
+
+The exposures of a run are handed to each DIALS program as one
+multi-experiment set, in a single `run/` directory. `orientation_N/` and
+`process_exposure` are gone. What this turned up:
+
+- **`joint_indexing` has to be given explicitly, and DIALS cannot work it
+  out.** A TOF experiment carries a goniometer and a scan over its bins, so
+  `is_still()` is **False**, and with more than one experiment
+  `joint_indexing=Auto` takes the all-rotation branch and aborts the run:
+  *"Unable to set joint_indexing automatically: set 'joint_indexing=True' for
+  multi-axis data from a single crystal or 'joint_indexing=False' for data from
+  multiple samples"*. `indexing.joint_indexing=False` is therefore hard-coded.
+- **The ladder is walked over the set, not per exposure.** One `dials.index`
+  call covers every exposure still wanting a solution; the next method is run
+  on just those that are left, and a final rung seeds the remainder from the
+  best crystal found. An exposure that reaches `target_rmsd_px` drops out; one
+  that is merely acceptable stays in, so a later rung can better it, and the
+  best attempt by RMSD is what is kept.
+- **The output of `dials.index` cannot be read positionally.** With
+  `joint_indexing=False` it indexes in a `ProcessPoolExecutor` and extends the
+  experiment list inside an `as_completed` loop, so **experiment order is
+  completion order**, and exposures that fail are dropped entirely — the output
+  list is shorter than the input and in an arbitrary order. What *is* reliable
+  is `imageset_id`: the code resets it to the original index with the comment
+  `# reset the imageset id to the original`. Every mapping back to an exposure
+  goes through it.
+- **A rung that solves nothing writes a column-less reflection table**, and
+  asking that for a flag raises `DXTBX_ASSERT(it != end())` rather than
+  returning nothing. Guarded on `refl.size()` and `"flags" in refl`.
+- **`dials.tof_integrate` assumes one detector shape and one TOF binning** for
+  the whole set — `image_size` and `tof_size` are read from `experiments[0]`
+  and applied to all. Two reductions of the same run at 50 and 100 bins import
+  together without complaint, so `_check_uniform` now rejects that up front.
+- **`spotfinding.max_strong` is now per exposure.** What it guards is an
+  assertion in the TOF reflection predictor, and `dials.refine` treats each
+  exposure as its own job (*"independently-refined groups of experiments have
+  been recombined"*), so one exposure's spot list is what reaches the
+  predictor however many there are.
+- **`panels=hierarchical` is a no-op without a level.** The NMX detector
+  hierarchy is flat — three panels on one root group — so the DIALS default
+  `hierarchy_level=0` is the whole detector as one rigid body and refines
+  exactly what `automatic` does: 16 parameters, byte-identical residuals.
+  Level 1 reaches the panels, 28 parameters, and on the N=2 test takes the
+  per-panel RMSD to 0.32 px. Both are hard-coded as `DETECTOR_PANELS` and
+  `DETECTOR_HIERARCHY_LEVEL`; exposing the level as phil is a one-liner if an
+  instrument with a deeper hierarchy turns up.
+- `combine` no longer concatenates N directories. The run is already one pair
+  of files, so it splits per exposure, assigns identifiers and renumbers
+  `imageset_id` for the batches.
+
+Verified on `rubr_splitbeamstop_mosaicity/...18545527`:
+
+| case | result |
+|---|---|
+| N=1, 100 bins | unchanged from before the restructure: 486/872 (55.7 %), 0.60 px, 386 reflections, 1 batch |
+| N=2 (one indexable file copied twice) | both index, **one** integrate call, 772 reflections, **2 batches** of 386, `validate_unmerged_mtz` passes at 2 batches, refine at 28 parameters |
+| N=4, 200 bins | exercises the failure paths: exposure 1 accepted at rung 1 and dropped from later rungs, 2 and 3 walk all three methods then the seeded rung, 4 skipped on `min_spots` (8 spots), run continues on the one that indexed |
+
+**TOF binning decides whether the cell is halved on this crystal**, independent
+of `max_cell`. At 100 bins the a axis comes out 34.4 Å; at both 50 and 200 bins
+it is 17.2 Å, with `max_cell=150` in all three. More evidence that binning is a
+pipeline parameter and not a fixed default. The 50-bin reduction is also where
+`min_indexed_fraction` bites hardest: spot lists of 8–9 k are almost all junk,
+`fft1d` finds a 1.50 px solution on 1283 of 9102 spots, and the 25 % gate
+rejects it. Another argument for item 3's ranking change.
 
 **Environment**: `.venv/` in this repo is the interpreter for all of it — see
 [Environment](#environment-and-external-programs) below. `dials_known_orientation_centred_cell_issue.md`

@@ -506,8 +506,8 @@ def _log_setup(setup: LaueTOFSetup) -> None:
     )
     if integration.mask == "both":
         xia2_logger.info(
-            "Integrating the first orientation with each foreground mask and"
-            f" keeping the better by {integration.mask_metric}"
+            "Integrating with each foreground mask and keeping the better by"
+            f" {integration.mask_metric}"
         )
     xia2_logger.info(
         f"Integration method: {integration.method}"
@@ -561,9 +561,10 @@ def run_xia2_laue_tof(
     """
     Run the Laue-TOF processing pipeline.
 
-    Each crystal orientation is processed independently, in its own
-    subdirectory:
-    import, find spots, index, refine and integrate.
+    Every exposure of the run goes through the DIALS steps together, in one
+    working directory: import, find spots, index, refine and integrate. They
+    are separate stationary measurements of one crystal, so indexing treats
+    each on its own while the other steps see the whole set.
     """
     setup = setup_from_phil(params)
 

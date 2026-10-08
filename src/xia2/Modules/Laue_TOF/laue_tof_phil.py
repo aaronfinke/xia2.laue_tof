@@ -4,7 +4,9 @@ phil_str = """
 image = None
   .type = str
   .multiple = True
-  .help = "Path to an image file. Give one per crystal orientation (setting)."
+  .help = "Path to an image file. Give one per exposure of the run; they are"
+          "stationary measurements of one crystal at different settings, and"
+          "are processed together."
   .expert_level = 0
 template = None
   .type = str
@@ -177,10 +179,11 @@ indexing {
     .expert_level = 1
   seed_from_first = True
     .type = bool
-    .help = "Seed the indexing of each exposure with the crystal model of the"
-            "first exposure that indexed. All exposures are measurements of the"
-            "same crystal, so this both enforces a consistent setting and"
-            "recovers orientations that will not index on their own."
+    .help = "After every method in the ladder has been tried, index whatever is"
+            "still unsolved from the crystal model of the best solution found."
+            "All the exposures are measurements of the same crystal, so this"
+            "both enforces a consistent setting and recovers exposures that"
+            "will not index on their own."
     .expert_level = 0
   outlier {
     algorithm = auto *mcd tukey sauter_poon null
@@ -219,9 +222,9 @@ integration {
   fallback_method = summation
     .type = str
     .help = "What to run when a profile method fails outright, or none to let"
-            "the failure stop the run. The failure and the fallback are logged,"
-            "and the fallback is then used for the remaining orientations"
-            "rather than failing again on each."
+            "the failure stop the run. The failure and the fallback are"
+            "logged. The whole run is integrated in one call, so the fallback"
+            "applies to every exposure at once."
     .expert_level = 1
   min_profile_fraction = 0.5
     .type = float(value_min=0, value_max=1)
@@ -231,7 +234,7 @@ integration {
             "1359 reflections on NMX test data - which is worse than useless,"
             "because the profile column then exists but covers a handful of"
             "reflections. Below this fraction the summation intensities are"
-            "used instead and the remaining orientations skip the profile fit."
+            "used instead."
     .expert_level = 1
   integration_type = *observed calculated
     .type = choice
@@ -270,8 +273,8 @@ integration {
             "mask_metric). The masks partition the shoebox differently, so"
             "which one is better is data dependent: seed_skewness typically"
             "takes in more of the peak tails and gives higher I/sigma, at"
-            "several times the run time. The choice made on the first"
-            "orientation is reused for the rest, so that every batch is"
+            "several times the run time. The run is integrated in one call, so"
+            "the choice covers every exposure and all the batches are"
             "integrated the same way."
     .expert_level = 1
   mask_metric = *i_over_sigma n_integrated

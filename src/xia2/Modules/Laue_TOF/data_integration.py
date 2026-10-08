@@ -72,10 +72,9 @@ class IndexingResult:
 
 @dataclass
 class ExposureResult:
-    """The outcome of processing one crystal orientation."""
+    """The outcome of processing one exposure of the run."""
 
     name: str
-    directory: pathlib.Path
     image: str
     n_strong: int = 0
     indexing: IndexingResult | None = None
@@ -90,12 +89,13 @@ class ExposureResult:
 @dataclass
 class IntegrationChoices:
     """
-    Integration decisions taken on the first orientation and reused for the rest.
+    The method and mask one run was integrated with.
 
-    Every orientation of a run has to be integrated the same way for the
-    batches to be comparable when they are scaled together, and retrying a
-    method that has already failed once, or re-comparing the two masks on every
-    orientation, only costs time.
+    Every exposure of a run has to be integrated the same way for the batches
+    to be comparable when they are scaled together, which is now automatic:
+    they are integrated in one call. The choices are still carried in one place
+    because the two-axis decision - which profile method survived, and which
+    foreground mask won - is made once and reported once.
     """
 
     method: str | None = None
@@ -237,10 +237,7 @@ def _format_class_name(image: str) -> str:
     return format_class.__name__ if format_class else "none"
 
 
-
-def apply_detector_calibration(
-    experiments: pathlib.Path, detcal: pathlib.Path
-) -> None:
+def apply_detector_calibration(experiments: pathlib.Path, detcal: pathlib.Path) -> None:
     """
     Replace the imported detector geometry with an ISAW/Mantid .DetCal one.
 
@@ -309,23 +306,31 @@ def apply_detector_calibration(
 
 def run_import(
     working_directory: pathlib.Path,
-    image: str,
+    inputs: list[tuple[str, str]],
     file_input: FileInput,
-    path_type: str = "image",
 ) -> pathlib.Path:
-    """Run dials.import on one exposure, and check that the data really is TOF."""
+    """
+    Run dials.import on every exposure of the run at once, and check that the
+    data really is TOF.
+
+    All the exposures go into one experiment list, which is what lets the
+    following steps see the run as a whole. Each becomes its own experiment and
+    its own imageset, because they are separate stationary measurements.
+    """
     experiments = working_directory / "imported.expt"
     command = [
         _executable("dials.import"),
-        f"{path_type}={image}" if path_type != "image" else image,
         "output.experiments=imported.expt",
     ]
+    for path_type, path in inputs:
+        command.append(f"{path_type}={path}" if path_type != "image" else path)
     if file_input.import_phil:
         command.insert(1, os.fspath(file_input.import_phil))
     if file_input.mask:
         command.append(f"mask={os.fspath(file_input.mask)}")
 
     xia2_logger.notice(banner("Importing"))  # type: ignore
+    image = inputs[0][1]
     try:
         _run_program(command, working_directory, "dials.import")
     except ValueError as e:
@@ -347,8 +352,16 @@ def run_import(
             f" {_format_class_name(image)}; check that the file holds TOF bins,"
             " and that the expected format class is reading it."
         )
+    if len(expts) != len(inputs):
+        raise ValueError(
+            f"{len(inputs)} input(s) were given but dials.import made"
+            f" {len(expts)} experiment(s). Every exposure of a run has to import"
+            " as exactly one experiment for the batches to line up with the"
+            " inputs."
+        )
+    _check_uniform(expts, inputs)
     xia2_logger.info(
-        f"Imported {len(expts)} experiment(s) with {_format_class_name(image)},"
+        f"Imported {len(expts)} exposure(s) with {_format_class_name(image)},"
         f" {len(expts[0].detector)} panels, {expts[0].scan.get_num_images()} TOF bins"
     )
     low, high = wavelength_range(expts[0])
@@ -358,6 +371,36 @@ def run_import(
         f" {two_theta:.0f} deg, so the geometry allows d_min = {d_min:.3f} A"
     )
     return experiments
+
+
+def _check_uniform(experiments, inputs: list[tuple[str, str]]) -> None:
+    """
+    Require every exposure to share a detector shape and a TOF binning.
+
+    dials.tof_integrate reads the panel size and the number of TOF bins from
+    the first experiment and applies them to all of them
+    (`image_size = experiments[0].detector[0].get_image_size()`), so a run whose
+    exposures were reduced to different bin counts is integrated against the
+    wrong frame axis rather than rejected. Two reductions of the same NMX run,
+    one at 50 bins and one at 100, import together without complaint, which is
+    how this was found.
+    """
+    shapes: dict[tuple[int, int], list[str]] = {}
+    for expt, (_, path) in zip(experiments, inputs):
+        key = (len(expt.detector), expt.scan.get_num_images())
+        shapes.setdefault(key, []).append(path)
+    if len(shapes) > 1:
+        lines = [
+            f"  {panels} panels, {bins} TOF bins: {', '.join(paths)}"
+            for (panels, bins), paths in sorted(shapes.items())
+        ]
+        raise ValueError(
+            "The exposures of a run do not share a detector shape and a TOF"
+            " binning, so they cannot be integrated together:\n"
+            + "\n".join(lines)
+            + "\nReduce them all to the same number of bins, or process them as"
+            " separate runs."
+        )
 
 
 def _report_size_filter(
@@ -407,8 +450,15 @@ def _report_size_filter(
         xia2_logger.info(message)
 
 
-def find_spots(working_directory: pathlib.Path, params: SpotfindingParams) -> int:
-    """Run dials.find_spots, returning the number of strong spots found."""
+def find_spots(
+    working_directory: pathlib.Path, params: SpotfindingParams, n_exposures: int = 1
+) -> list[int]:
+    """
+    Run dials.find_spots over the whole run, returning the spots per exposure.
+
+    One call covers every exposure, and the strong spots come back in a single
+    table whose `id` column says which exposure each spot belongs to.
+    """
     command = [
         _executable("dials.find_spots"),
         "imported.expt",
@@ -434,17 +484,34 @@ def find_spots(working_directory: pathlib.Path, params: SpotfindingParams) -> in
     )
 
     strong = flex.reflection_table.from_file(working_directory / "strong.refl")
-    n_strong = strong.size()
-    xia2_logger.info(f"Found {n_strong} strong spots")
-    _report_size_filter(working_directory / "dials.find_spots.log", params, n_strong)
-    if n_strong > params.max_strong:
-        raise ValueError(
-            f"{n_strong} strong spots found, more than spotfinding.max_strong"
-            f" ({params.max_strong}). Large spot lists trip an assertion in the"
-            " DIALS TOF reflection predictor during refinement; raise"
-            " spotfinding.min_spot_size, or raise the limit if you are sure."
+    counts = [(strong["id"] == i).count(True) for i in range(n_exposures)]
+    total = strong.size()
+    if n_exposures > 1:
+        xia2_logger.info(
+            f"Found {total} strong spots over {n_exposures} exposures: "
+            + ", ".join(f"{n}" for n in counts)
         )
-    return n_strong
+    else:
+        xia2_logger.info(f"Found {total} strong spots")
+    _report_size_filter(working_directory / "dials.find_spots.log", params, total)
+
+    # The limit is per exposure, not over the run. What it guards against is an
+    # assertion in the DIALS TOF reflection predictor, and refinement treats
+    # each exposure as its own job - dials.refine says "independently-refined
+    # groups of experiments have been recombined" - so one exposure's spot list
+    # is what reaches the predictor, however many exposures there are.
+    over = [i for i, n in enumerate(counts) if n > params.max_strong]
+    if over:
+        worst = max(over, key=lambda i: counts[i])
+        raise ValueError(
+            f"Exposure {worst + 1} has {counts[worst]} strong spots, more than"
+            f" spotfinding.max_strong ({params.max_strong})"
+            + (f"; {len(over)} exposures are over the limit" if len(over) > 1 else "")
+            + ". Large spot lists trip an assertion in the DIALS TOF reflection"
+            " predictor during refinement; raise spotfinding.min_spot_size, or"
+            " raise the limit if you are sure."
+        )
+    return counts
 
 
 def _primitive_setting_a_matrix(crystal: Crystal) -> tuple[float, ...]:
@@ -466,26 +533,25 @@ def _primitive_setting_a_matrix(crystal: Crystal) -> tuple[float, ...]:
 
 
 def _assess_indexing(
-    working_directory: pathlib.Path, method: str, params: IndexingParams, n_strong: int
+    method: str,
+    params: IndexingParams,
+    n_strong: int,
+    crystal: Crystal | None,
+    indexed: flex.reflection_table,
 ) -> IndexingResult:
     """
-    Decide whether an indexing solution is good enough to keep.
+    Decide whether one exposure's indexing solution is good enough to keep.
 
     Indexing that 'worked' is not enough: a small, clean spot list indexes
     almost completely, and an alternative indexing can index plenty of
     reflections on the wrong cell. So check the cell, the number indexed and
     the positional residuals.
+
+    Takes the crystal and the exposure's own indexed reflections rather than a
+    pair of file names, because one dials.index call now covers the whole run
+    and each exposure has to be judged on its own rows.
     """
     result = IndexingResult(method=method, n_strong=n_strong)
-    experiments = working_directory / f"indexed_{method}.expt"
-    reflections = working_directory / f"indexed_{method}.refl"
-    if not (experiments.is_file() and reflections.is_file()):
-        result.reason = "no solution found"
-        return result
-
-    expts = load.experiment_list(experiments, check_format=False)
-    refl = flex.reflection_table.from_file(reflections)
-    indexed = refl.select(refl.get_flags(refl.flags.indexed))
     result.n_indexed = indexed.size()
 
     if "xyzcal.px" in indexed and indexed.size():
@@ -500,10 +566,9 @@ def _assess_indexing(
         squared = flex.pow2(dx) + flex.pow2(dy)
         result.rmsd_px = float(sorted(squared)[squared.size() // 2] ** 0.5)
 
-    if not expts.crystals():
+    if crystal is None:
         result.reason = "no crystal model"
         return result
-    crystal = expts.crystals()[0]
     result.crystal = crystal
 
     required = max(params.min_indexed, int(params.min_indexed_fraction * n_strong))
@@ -540,139 +605,340 @@ def _assess_indexing(
     return result
 
 
-def index(
-    working_directory: pathlib.Path,
-    params: IndexingParams,
-    n_strong: int,
-    seed_crystal: Crystal | None = None,
-) -> list[IndexingResult]:
+def _write_indexing_subset(
+    working_directory: pathlib.Path, exposures: list[int], tag: str
+) -> tuple[str, str]:
     """
-    Run dials.index, trying each method in turn until a solution is accepted.
+    Write the imported experiments and strong spots of a subset of exposures.
 
-    Near the limit of what a detector layout can support, indexing succeeds
-    stochastically rather than reproducibly, so one recipe is not enough.
-    Returns every attempt made, the last of which is the accepted solution if
-    there is one.
+    A rung of the ladder only has to re-index the exposures the earlier rungs
+    did not solve, so each rung gets its own pair of input files holding just
+    those. Experiment ids are renumbered from zero, which is what dials.index
+    expects, and the mapping back to the original exposure is the position in
+    `exposures`.
     """
-    if n_strong < params.min_spots:
-        return [
-            IndexingResult(
-                method="none",
-                n_strong=n_strong,
-                reason=f"only {n_strong} strong spots, fewer than indexing.min_spots",
-            )
-        ]
+    expts = load.experiment_list(
+        working_directory / "imported.expt", check_format=False
+    )
+    strong = flex.reflection_table.from_file(working_directory / "strong.refl")
 
-    base_command = [
-        _executable("dials.index"),
-        "imported.expt",
-        "strong.refl",
-    ]
+    subset = ExperimentList([expts[i] for i in exposures])
+    tables = []
+    for new_id, old_id in enumerate(exposures):
+        rows = strong.select(strong["id"] == old_id)
+        rows["id"] = flex.int(rows.size(), new_id)
+        if "imageset_id" in rows:
+            rows["imageset_id"] = flex.int(rows.size(), new_id)
+        tables.append(rows)
+    table = flex.reflection_table.concat(tables) if len(tables) > 1 else tables[0]
+
+    experiments_file = f"to_index_{tag}.expt"
+    reflections_file = f"to_index_{tag}.refl"
+    subset.as_file(working_directory / experiments_file)  # type: ignore[attr-defined]
+    table.as_file(working_directory / reflections_file)
+    return experiments_file, reflections_file
+
+
+def _indexing_base_command(params: IndexingParams) -> list[str]:
+    """The dials.index arguments every rung of the ladder shares."""
+    command = [_executable("dials.index")]
     if params.phil:
-        base_command.insert(1, os.fspath(params.phil))
+        command.append(os.fspath(params.phil))
     if params.space_group:
-        base_command.append(f"indexing.known_symmetry.space_group={params.space_group}")
+        command.append(f"indexing.known_symmetry.space_group={params.space_group}")
     if params.unit_cell:
         cell = ",".join(f"{p}" for p in params.unit_cell.parameters())
-        base_command.append(f"indexing.known_symmetry.unit_cell={cell}")
+        command.append(f"indexing.known_symmetry.unit_cell={cell}")
     if params.max_cell:
-        base_command.append(f"indexing.max_cell={params.max_cell}")
+        command.append(f"indexing.max_cell={params.max_cell}")
     if params.d_min_start:
-        base_command.append(
-            f"indexing.refinement_protocol.d_min_start={params.d_min_start}"
-        )
-    base_command += [
+        command.append(f"indexing.refinement_protocol.d_min_start={params.d_min_start}")
+    command += [
+        # The exposures of a run are separate stationary measurements of one
+        # crystal, each at its own setting, so there is no single orientation to
+        # fit and they must be indexed independently. DIALS cannot infer this:
+        # a TOF experiment carries a goniometer and a scan over its bins, so
+        # is_still() is False and joint_indexing=Auto takes the all-rotation
+        # branch, which refuses to choose and aborts the run.
+        "indexing.joint_indexing=False",
         f"refinement.reflections.outlier.algorithm={params.outlier_algorithm}",
         f"refinement.reflections.outlier.tukey.iqr_multiplier={params.outlier_iqr_multiplier}",
         f"refinement.reflections.outlier.separate_panels={params.outlier_separate_panels}",
     ]
+    return command
+
+
+def _assess_rung(
+    working_directory: pathlib.Path,
+    tag: str,
+    method: str,
+    params: IndexingParams,
+    exposures: list[int],
+    n_strong: list[int],
+) -> tuple[dict[int, IndexingResult], dict[int, int]]:
+    """
+    Judge what one dials.index call returned, per exposure.
+
+    The output holds only the exposures that produced a crystal, in the order
+    their worker processes finished - dials.index extends the list inside an
+    `as_completed` loop - so the position of an experiment says nothing about
+    which exposure it came from. Its reflections' `imageset_id` does: DIALS
+    resets that to the index within this call, which maps back through
+    `exposures`.
+
+    Returns the assessment per exposure, and where each exposure's experiment
+    sits in this rung's output, which is what lifts it back out later.
+    """
+    experiments_file = working_directory / f"indexed_{tag}.expt"
+    reflections_file = working_directory / f"indexed_{tag}.refl"
+    results: dict[int, IndexingResult] = {}
+    positions: dict[int, int] = {}
+    if not (experiments_file.is_file() and reflections_file.is_file()):
+        return results, positions
+
+    expts = load.experiment_list(experiments_file, check_format=False)
+    refl = flex.reflection_table.from_file(reflections_file)
+    # A rung that solved nothing still writes its files, and the reflection
+    # table is then not merely empty but column-less, so asking it for a flag
+    # raises rather than returning nothing.
+    if not refl.size() or "flags" not in refl:
+        return results, positions
+
+    indexed = refl.select(refl.get_flags(refl.flags.indexed))
+    for position, expt in enumerate(expts):
+        rows = indexed.select(indexed["id"] == position)
+        if not rows.size():
+            continue
+        subset_ids = set(rows["imageset_id"])
+        if len(subset_ids) != 1:
+            raise ValueError(
+                f"Experiment {position} of {experiments_file.name} mixes"
+                f" imageset ids {sorted(subset_ids)}, so it cannot be traced"
+                " back to one exposure"
+            )
+        exposure = exposures[subset_ids.pop()]
+        positions[exposure] = position
+        results[exposure] = _assess_indexing(
+            method, params, n_strong[exposure], expt.crystal, rows
+        )
+    return results, positions
+
+
+def _merge_indexed(
+    working_directory: pathlib.Path,
+    chosen: dict[int, tuple[str, int]],
+) -> None:
+    """
+    Gather the accepted solutions into one indexed.expt / indexed.refl.
+
+    The ladder leaves each rung's output on disk, so an accepted exposure has
+    to be lifted out of whichever rung solved it. Exposures are written in
+    input order, so the batches that reach the MTZ follow the order the
+    exposures were given in rather than the order they happened to index in.
+
+    Only the indexed reflections are carried over. The unindexed ones share a
+    single id of -1, which says nothing about which exposure they came from
+    once several exposures are in one table, and nothing downstream reads them.
+    """
+    experiments = ExperimentList()
+    tables = []
+    for exposure in sorted(chosen):
+        tag, position = chosen[exposure]
+        expts = load.experiment_list(
+            working_directory / f"indexed_{tag}.expt", check_format=False
+        )
+        refl = flex.reflection_table.from_file(
+            working_directory / f"indexed_{tag}.refl"
+        )
+        rows = refl.select(refl["id"] == position)
+        new_id = len(experiments)
+        rows["id"] = flex.int(rows.size(), new_id)
+        rows["imageset_id"] = flex.int(rows.size(), new_id)
+        experiments.append(expts[position])
+        tables.append(rows)
+
+    table = flex.reflection_table.concat(tables) if len(tables) > 1 else tables[0]
+    experiments.as_file(working_directory / "indexed.expt")  # type: ignore[attr-defined]
+    table.as_file(working_directory / "indexed.refl")
+
+
+def index(
+    working_directory: pathlib.Path,
+    params: IndexingParams,
+    n_strong: list[int],
+) -> list[list[IndexingResult]]:
+    """
+    Index every exposure of the run, walking the method ladder over the set.
+
+    One dials.index call covers all the exposures still wanting a solution, with
+    joint_indexing=False so that each is indexed on its own. Near the limit of
+    what a detector layout can support indexing succeeds stochastically rather
+    than reproducibly, so a rung that leaves some exposures unsolved is followed
+    by the next method on just those, and finally by a seeded attempt using the
+    crystal of an exposure that did solve - which is what rescues layouts that
+    never index de novo.
+
+    Returns the attempts made for each exposure, the last of which is its
+    accepted solution if it has one.
+    """
+    attempts: list[list[IndexingResult]] = [[] for _ in n_strong]
+    pending = []
+    for exposure, count in enumerate(n_strong):
+        if count < params.min_spots:
+            attempts[exposure].append(
+                IndexingResult(
+                    method="none",
+                    n_strong=count,
+                    reason=f"only {count} strong spots, fewer than indexing.min_spots",
+                )
+            )
+        else:
+            pending.append(exposure)
+
+    if not pending:
+        return attempts
+
+    base_command = _indexing_base_command(params)
     xia2_logger.notice(banner("Indexing"))  # type: ignore
 
-    if seed_crystal:
-        # Supplying an A matrix makes dials.index use the known orientation
-        # indexer, which ignores indexing.method, so the seeded attempt is one
-        # attempt, not a ladder. It comes first because it is the cheapest way
-        # to a consistent setting, but it is only right if the crystal is in
-        # the same orientation as the exposure it came from: on data taken at
-        # several goniometer settings it is the wrong orientation, and the
-        # ladder still has to be walked.
-        a_matrix = ",".join(f"{v}" for v in _primitive_setting_a_matrix(seed_crystal))
-        xia2_logger.info("Seeding with the crystal model of a previous exposure")
-        methods = [KNOWN_ORIENTATION] + list(params.methods)
-    else:
-        a_matrix = ""
-        methods = list(params.methods)
+    # Where every accepted solution lives, keyed by exposure and method: the
+    # rung's tag and the position of that exposure's experiment in the rung's
+    # output. Keyed by method as well as exposure because an exposure can be
+    # solved more than once, and the best of those is chosen at the end.
+    locations: dict[tuple[int, str], tuple[str, int]] = {}
+    # The best accepted result per exposure so far, to pick a seed crystal from.
+    accepted: dict[int, IndexingResult] = {}
 
-    attempts = []
-    for method in methods:
-        command = base_command + [
-            f"output.log=dials.index.{method}.log",
-            f"output.experiments=indexed_{method}.expt",
-            f"output.reflections=indexed_{method}.refl",
-        ]
+    rungs: list[tuple[str, str]] = [(method, method) for method in params.methods]
+    if params.seed_from_first:
+        rungs.append((KNOWN_ORIENTATION, KNOWN_ORIENTATION))
+
+    for method, tag in rungs:
+        if not pending:
+            break
+        seed_crystal: Crystal | None = None
         if method == KNOWN_ORIENTATION:
+            solved = [
+                result for result in accepted.values() if result.crystal is not None
+            ]
+            if not solved:
+                # Nothing indexed, so there is no model to seed with.
+                break
+            best = min(solved, key=lambda r: (r.rmsd_px is None, r.rmsd_px))
+            seed_crystal = best.crystal
+            xia2_logger.info(
+                f"Seeding the {len(pending)} unindexed exposure(s) with the"
+                " crystal of the best solution so far"
+            )
+
+        experiments_file, reflections_file = _write_indexing_subset(
+            working_directory, pending, tag
+        )
+        command = base_command + [
+            experiments_file,
+            reflections_file,
+            f"output.log=dials.index.{tag}.log",
+            f"output.experiments=indexed_{tag}.expt",
+            f"output.reflections=indexed_{tag}.refl",
+        ]
+        if seed_crystal is not None:
+            # Supplying an A matrix routes dials.index into the known
+            # orientation indexer, which ignores indexing.method.
+            a_matrix = ",".join(
+                f"{v}" for v in _primitive_setting_a_matrix(seed_crystal)
+            )
             command.append(f"indexing.known_symmetry.A_matrix={a_matrix}")
         else:
             command.append(f"indexing.method={method}")
-            if seed_crystal and method == methods[1]:
-                xia2_logger.info(
-                    "The seeded solution was not accepted, so this exposure is"
-                    " being indexed from scratch"
-                )
+
+        rung = list(pending)
+        results: dict[int, IndexingResult] = {}
+        positions: dict[int, int] = {}
         try:
             _run_program(command, working_directory, "dials.index")
         except ValueError as e:
             xia2_logger.debug(f"Indexing with method={method} failed:\n{e}")
-            result = IndexingResult(
-                method=method, n_strong=n_strong, reason="dials.index failed"
-            )
         else:
-            result = _assess_indexing(working_directory, method, params, n_strong)
-        _record_log(
-            f"{working_directory.name} index ({method})",
-            working_directory / f"dials.index.{method}.log",
-        )
-        xia2_logger.info(result.summary())
-        attempts.append(result)
-        if result.accepted and (
-            result.rmsd_px is None
-            or params.target_rmsd_px is None
-            or result.rmsd_px <= params.target_rmsd_px
-        ):
-            # Good enough that trying the rest of the ladder would only cost time
-            break
+            results, positions = _assess_rung(
+                working_directory, tag, method, params, rung, n_strong
+            )
+        _record_log(f"index ({tag})", working_directory / f"dials.index.{tag}.log")
 
-    accepted = [attempt for attempt in attempts if attempt.accepted]
+        for exposure in rung:
+            result = results.get(exposure)
+            if result is None:
+                result = IndexingResult(
+                    method=method,
+                    n_strong=n_strong[exposure],
+                    reason="no solution found",
+                )
+            attempts[exposure].append(result)
+            xia2_logger.info(f"Exposure {exposure + 1}: {result.summary()}")
+            if not result.accepted:
+                continue
+            accepted[exposure] = result
+            locations[(exposure, method)] = (tag, positions[exposure])
+            good_enough = (
+                result.rmsd_px is None
+                or params.target_rmsd_px is None
+                or result.rmsd_px <= params.target_rmsd_px
+            )
+            if good_enough:
+                # Good enough that a later rung would only cost time.
+                pending.remove(exposure)
+            # An exposure whose solution was merely acceptable stays pending, so
+            # that a later rung can try to better it. Its accepted result is
+            # kept either way, and the best of them wins below.
+
     if not accepted:
         return attempts
 
-    # The methods do not rank in a fixed order - which one fits a given
-    # orientation best is what the ladder is for - so take the best of those
-    # that passed rather than the first, and put its files where the following
-    # steps expect them.
-    chosen = min(accepted, key=lambda a: (a.rmsd_px is None, a.rmsd_px))
-    if len(accepted) > 1:
-        xia2_logger.info(f"Keeping the {chosen.method} solution, by RMSD")
-    for suffix in ("expt", "refl"):
-        shutil.copyfile(
-            working_directory / f"indexed_{chosen.method}.{suffix}",
-            working_directory / f"indexed.{suffix}",
-        )
-    return [attempt for attempt in attempts if attempt is not chosen] + [chosen]
+    # A later rung is walked because an earlier one was merely acceptable, not
+    # because it is bound to be better, so each exposure keeps its best attempt
+    # by RMSD rather than its last.
+    chosen: dict[int, tuple[str, int]] = {}
+    for exposure in sorted(accepted):
+        solutions = [a for a in attempts[exposure] if a.accepted]
+        best = min(solutions, key=lambda a: (a.rmsd_px is None, a.rmsd_px))
+        if len(solutions) > 1 and attempts[exposure][-1] is not best:
+            xia2_logger.info(
+                f"Exposure {exposure + 1}: keeping the {best.method} solution, by RMSD"
+            )
+        # The accepted solution is reported last, as the outcome.
+        attempts[exposure].remove(best)
+        attempts[exposure].append(best)
+        chosen[exposure] = locations[(exposure, best.method)]
+
+    _merge_indexed(working_directory, chosen)
+    return attempts
+
+
+# How dials.refine parameterises the detector, always. Hierarchical rather
+# than automatic so that the panels are free to move relative to one another,
+# which is what a multi-panel TOF instrument needs: with one rigid detector,
+# refinement absorbs a per-panel error into the crystal orientation instead of
+# correcting it, and leaves residuals no mask or profile model can recover
+# from. The level matters as much as the choice - on a flat hierarchy, which is
+# what the three NMX panels hang off, level 0 *is* the whole detector as one
+# body and refines exactly what automatic does (16 parameters, identical
+# residuals); level 1 reaches the panels themselves (28 parameters).
+DETECTOR_PANELS = "hierarchical"
+DETECTOR_HIERARCHY_LEVEL = 1
 
 
 def refine(working_directory: pathlib.Path) -> None:
-    """Run dials.refine on the indexing solution."""
+    """Run dials.refine on the indexing solution, for every exposure at once."""
     command = [
         _executable("dials.refine"),
         "indexed.expt",
         "indexed.refl",
+        f"refinement.parameterisation.detector.panels={DETECTOR_PANELS}",
+        "refinement.parameterisation.detector.hierarchy_level"
+        f"={DETECTOR_HIERARCHY_LEVEL}",
     ]
     xia2_logger.notice(banner("Refining"))  # type: ignore
     _run_program(command, working_directory, "dials.refine")
-    _record_log(
-        f"{working_directory.name} refine", working_directory / "dials.refine.log"
-    )
+    _record_log("refine", working_directory / "dials.refine.log")
 
 
 def _tof_integrate_command(
@@ -1053,43 +1319,40 @@ def integrate(
 
 
 def combine(
-    working_directory: pathlib.Path, results: list[ExposureResult]
+    working_directory: pathlib.Path,
+    integrated_directory: pathlib.Path,
+    results: list[ExposureResult],
 ) -> tuple[pathlib.Path, pathlib.Path]:
     """
-    Concatenate the integrated output of every orientation into one pair of
-    files, ready to export.
+    Split the run's integrated output per exposure and write it ready to export.
 
-    Each orientation keeps its own experiment identifier and its own batch, so
-    that the exported intensities can be scaled per setting downstream.
+    The exposures were integrated together, so this no longer concatenates
+    files; it gives each exposure its own experiment identifier and its own
+    batch, so that the exported intensities can be scaled per setting
+    downstream.
     """
-    integrated = [result for result in results if result.integrated]
-    if not integrated:
-        raise ValueError(
-            "No orientation was integrated, so there is nothing to combine"
-        )
+    indexed = [result for result in results if result.indexed]
+    if not indexed:
+        raise ValueError("No exposure was integrated, so there is nothing to combine")
     working_directory.mkdir(parents=True, exist_ok=True)
     xia2_logger.notice(banner("Combining"))  # type: ignore
 
+    expts = load.experiment_list(
+        integrated_directory / "integrated.expt", check_format=False
+    )
+    table = flex.reflection_table.from_file(integrated_directory / "integrated.refl")
+    tables = parse_multiple_datasets([table])
     experiments = ExperimentList()
-    tables = []
-    # Which orientation each of the combined experiments came from
-    origins: list[str] = []
-    for result in integrated:
-        expts = load.experiment_list(
-            result.directory / "integrated.expt", check_format=False
-        )
-        table = flex.reflection_table.from_file(result.directory / "integrated.refl")
-        split = parse_multiple_datasets([table])
-        experiments.extend(expts)
-        tables.extend(split)
-        origins.extend([result.name] * len(split))
+    experiments.extend(expts)
+    # Which exposure each of the experiments came from. indexed.expt was built
+    # in input order, and nothing since has reordered it.
+    origins = [result.name for result in indexed][: len(tables)]
     experiments, tables = assign_unique_identifiers(experiments, tables)
     _match_intensity_columns(tables, origins)
 
-    # dials.export numbers the Laue batches by imageset_id, which is zero in
-    # every per-orientation file. Renumber it to the position of the experiment
-    # in the combined list, which is also where its imageset now sits, so that
-    # each orientation exports as its own batch.
+    # dials.export numbers the Laue batches by imageset_id. Renumber it to the
+    # position of the experiment in the list, so that each exposure exports as
+    # its own batch rather than every one of them as batch 0.
     for i, (table, origin) in enumerate(zip(tables, origins)):
         table["imageset_id"] = flex.int(table.size(), i)
         xia2_logger.info(f"Batch {i}: {origin}, {table.size()} reflections")
@@ -1281,83 +1544,8 @@ def unmerged_mtz(
     return mtz_file
 
 
-def _refined_crystal(working_directory: pathlib.Path) -> Crystal:
-    """The crystal model of a refined experiment."""
-    expts = load.experiment_list(working_directory / "refined.expt", check_format=False)
-    return expts.crystals()[0]
-
-
-def _index_and_refine(
-    working_directory: pathlib.Path,
-    image: str,
-    setup: LaueTOFSetup,
-    result: ExposureResult,
-    seed_crystal: Crystal | None,
-    path_type: str = "image",
-) -> bool:
-    """
-    Import, find spots, index and refine in one directory.
-
-    Returns whether there is a refined solution to integrate.
-    """
-    run_import(working_directory, image, setup.file_input, path_type)
-
-    if "find_spots" not in setup.options.steps:
-        return False
-    result.n_strong = find_spots(working_directory, setup.spotfinding_params)
-
-    if "index" not in setup.options.steps:
-        return False
-    attempts = index(
-        working_directory, setup.indexing_params, result.n_strong, seed_crystal
-    )
-    result.attempts = attempts
-    result.indexing = attempts[-1] if attempts else None
-    if not result.indexed:
-        reason = result.indexing.reason if result.indexing else "no attempt made"
-        xia2_logger.warning(f"{result.name} did not index: {reason}")
-        return False
-
-    if "refine" not in setup.options.steps:
-        return False
-    refine(working_directory)
-    return True
-
-
-def process_exposure(
-    working_directory: pathlib.Path,
-    image: str,
-    setup: LaueTOFSetup,
-    seed_crystal: Crystal | None = None,
-    path_type: str = "image",
-    choices: IntegrationChoices | None = None,
-) -> ExposureResult:
-    """
-    Process one crystal orientation: import, find spots, index, refine and
-    integrate, in its own directory.
-    """
-    working_directory.mkdir(parents=True, exist_ok=True)
-    name = working_directory.name
-    xia2_logger.notice(banner(f"Processing {name}"))  # type: ignore
-    xia2_logger.info(f"Input: {image}")
-
-    result = ExposureResult(name=name, directory=working_directory, image=image)
-
-    if not _index_and_refine(
-        working_directory, image, setup, result, seed_crystal, path_type
-    ):
-        return result
-
-    if "integrate" not in setup.options.steps:
-        return result
-
-    integrate(working_directory, setup.integration_params, choices)
-    result.integrated = True
-    return result
-
-
 def _report(results: list[ExposureResult]) -> None:
-    """Summarise what happened to each orientation."""
+    """Summarise what happened to each exposure."""
     xia2_logger.notice(banner("Summary"))  # type: ignore
     for result in results:
         if result.integrated:
@@ -1378,68 +1566,79 @@ def run_data_integration(
     root_working_directory: pathlib.Path, setup: LaueTOFSetup
 ) -> list[ExposureResult]:
     """
-    Process every crystal orientation, each in its own directory.
+    Process one run: every exposure of it, through the DIALS steps together.
 
-    All the exposures are of the same crystal, so once one of them has indexed
-    its crystal model is used to seed the rest. Any exposure that did not index
-    on its own is then retried with that seed, which is what recovers the
-    orientations that never index de novo.
+    The exposures are stationary measurements of one crystal at different
+    settings, so they belong to one run and are handed to each DIALS program as
+    a single multi-experiment set. Indexing is the step that has to know they
+    are separate measurements rather than one sweep, which is what
+    joint_indexing=False tells it.
     """
     inputs = [("image", image) for image in setup.file_input.images]
     inputs += [("template", t) for t in setup.file_input.templates]
     inputs += [("directory", d) for d in setup.file_input.directories]
 
-    results: list[ExposureResult] = []
-    seed_crystal: Crystal | None = None
-    # How many exposures were processed before there was a model to seed with.
-    # Only those can gain anything from a second attempt.
-    seeded_from = len(inputs)
-    choices = IntegrationChoices()
+    run_directory = root_working_directory / "run"
+    run_directory.mkdir(parents=True, exist_ok=True)
+    xia2_logger.notice(banner(f"Processing {len(inputs)} exposure(s)"))  # type: ignore
+    for i, (_, path) in enumerate(inputs, start=1):
+        xia2_logger.info(f"Exposure {i}: {path}")
 
-    for i, (path_type, image) in enumerate(inputs, start=1):
-        working_directory = root_working_directory / f"orientation_{i}"
-        result = process_exposure(
-            working_directory, image, setup, seed_crystal, path_type, choices
+    results = [
+        ExposureResult(name=f"exposure_{i}", image=path)
+        for i, (_, path) in enumerate(inputs, start=1)
+    ]
+
+    run_import(run_directory, inputs, setup.file_input)
+
+    if "find_spots" not in setup.options.steps:
+        return results
+    counts = find_spots(run_directory, setup.spotfinding_params, len(inputs))
+    for result, count in zip(results, counts):
+        result.n_strong = count
+
+    if "index" not in setup.options.steps:
+        return results
+    attempts = index(run_directory, setup.indexing_params, counts)
+    for result, exposure_attempts in zip(results, attempts):
+        result.attempts = exposure_attempts
+        result.indexing = exposure_attempts[-1] if exposure_attempts else None
+        if not result.indexed:
+            reason = result.indexing.reason if result.indexing else "no attempt made"
+            xia2_logger.warning(f"{result.name} did not index: {reason}")
+
+    indexed = [result for result in results if result.indexed]
+    if not indexed:
+        xia2_logger.warning("No exposure indexed, so there is nothing to refine")
+        _report(results)
+        return results
+    if len(indexed) < len(results):
+        xia2_logger.warning(
+            f"{len(results) - len(indexed)} of {len(results)} exposures did not"
+            " index and are left out of the rest of the run"
         )
-        results.append(result)
-        if (
-            seed_crystal is None
-            and setup.indexing_params.seed_from_first
-            and result.indexed
-        ):
-            seed_crystal = result.indexing.crystal  # type: ignore[union-attr]
-            seeded_from = i
 
-    # Retry anything that did not index, now that there is a model to seed
-    # with. An exposure that already had the seed on its first attempt is not
-    # retried: it would be the same run of the same program on the same data.
-    if seed_crystal and setup.indexing_params.seed_from_first:
-        for i, result in enumerate(results):
-            if result.indexed or not result.n_strong or i >= seeded_from:
-                continue
-            xia2_logger.info(f"Retrying {result.name} with the seed crystal")
-            retried = process_exposure(
-                result.directory,
-                result.image,
-                setup,
-                seed_crystal,
-                inputs[i][0],
-                choices,
-            )
-            results[i] = retried
+    if "refine" not in setup.options.steps:
+        _report(results)
+        return results
+    refine(run_directory)
+
+    if "integrate" not in setup.options.steps:
+        _report(results)
+        return results
+    integrate(run_directory, setup.integration_params)
+    for result in indexed:
+        result.integrated = True
 
     _report(results)
 
     if "combine" not in setup.options.steps:
         return results
-    if not any(result.integrated for result in results):
-        xia2_logger.warning(
-            "No orientation was integrated, so there is nothing to combine or export"
-        )
-        return results
 
     scale_directory = root_working_directory / "scale"
-    experiments_file, reflections_file = combine(scale_directory, results)
+    experiments_file, reflections_file = combine(
+        scale_directory, run_directory, results
+    )
     if "export" in setup.options.steps:
         export_shelx(scale_directory, setup.export_params)
     if "unmerged_mtz" not in setup.options.steps:
