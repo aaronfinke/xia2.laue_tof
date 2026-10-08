@@ -237,6 +237,7 @@ def _format_class_name(image: str) -> str:
     return format_class.__name__ if format_class else "none"
 
 
+
 def apply_detector_calibration(
     experiments: pathlib.Path, detcal: pathlib.Path
 ) -> None:
@@ -488,12 +489,16 @@ def _assess_indexing(
     result.n_indexed = indexed.size()
 
     if "xyzcal.px" in indexed and indexed.size():
-        # Over every indexed reflection, outliers included, so this runs higher
-        # than the RMSD_X/RMSD_Y that dials.index reports after refinement has
-        # rejected outliers. Compare it with other values from here, not with
-        # the numbers in the dials.index log.
+        # The median residual, not the mean: a solution that is right about most
+        # of the spot list can carry a tail of badly fitted reflections that the
+        # mean is dominated by, and rejecting it loses a whole orientation. On
+        # MANDI 13380 the mean says 9.38 px and the median 1.92 px, where
+        # dials.index, which reports its RMSD after refinement has discarded
+        # outliers, says 1.45 / 1.12 px. Comparable with the dials.index log to
+        # within the difference between a median and an outlier-rejected mean.
         dx, dy, _ = (indexed["xyzobs.px.value"] - indexed["xyzcal.px"]).parts()
-        result.rmsd_px = float(flex.mean(dx * dx + dy * dy) ** 0.5)
+        squared = flex.pow2(dx) + flex.pow2(dy)
+        result.rmsd_px = float(sorted(squared)[squared.size() // 2] ** 0.5)
 
     if not expts.crystals():
         result.reason = "no crystal model"

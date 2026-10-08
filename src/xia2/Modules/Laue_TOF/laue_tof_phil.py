@@ -29,7 +29,7 @@ empty_run = None
 mask = None
   .type = path
   .help = "A mask to use for spotfinding and integration"
-  .expert_level = 1
+  .expert_level = 0
 detector_calibration = None
   .type = path
   .help = "An ISAW/Mantid .DetCal file giving refined per-panel positions."
@@ -38,7 +38,7 @@ detector_calibration = None
           "geometry can be wrong by several pixels per panel, which refinement"
           "absorbs into the crystal orientation rather than correcting, leaving"
           "per-panel residuals that no mask or profile model can recover from."
-  .expert_level = 1
+  .expert_level = 0
 space_group = None
   .type = space_group
   .help = "Space group to be used for indexing and integration."
@@ -46,22 +46,22 @@ space_group = None
 d_min = None
   .type = float
   .help = "High resolution cutoff for spotfinding."
-  .expert_level = 1
+  .expert_level = 0
 d_max = None
   .type = float
   .help = "Low resolution cutoff for spotfinding."
-  .expert_level = 1
+  .expert_level = 0
 multiprocessing {
   nproc = Auto
     .type = int
-    .expert_level = 2
+    .expert_level = 1
 }
 dials_import.phil = None
   .type = path
   .help = "Phil file to use for dials.import. Parameters defined in the"
           "xia2.laue_tof phil scope will take precedent over identical options"
           "defined in the phil file."
-  .expert_level = 3
+  .expert_level = 2
 """
 
 spotfinding_phil_str = """
@@ -69,25 +69,25 @@ spotfinding {
   min_spot_size = 15
     .type = int
     .help = "The minimum spot size to allow in spotfinding."
-    .expert_level = 1
+    .expert_level = 0
   max_spot_size = None
     .type = int
     .help = "The maximum spot size to allow in spotfinding."
-    .expert_level = 2
+    .expert_level = 1
   threshold_algorithm = dispersion *dispersion_extended radial_profile
     .type = choice
-    .expert_level = 2
+    .expert_level = 1
   max_strong = 35000
     .type = int
     .help = "If more than this many strong spots are found, stop rather than"
             "proceed to indexing."
-    .expert_level = 3
+    .expert_level = 2
   phil = None
     .type = path
     .help = "Phil options file to use for spotfinding. Parameters defined in"
             "the xia2.laue_tof phil scope will take precedent over identical"
             "options defined in the phil file."
-    .expert_level = 3
+    .expert_level = 2
 }
 """
 
@@ -100,13 +100,13 @@ indexing {
     .type = str
     .help = "Indexing method to use. If None, each method given in"
             "indexing.ladder is tried in turn until one succeeds."
-    .expert_level = 1
+    .expert_level = 0
   ladder = fft3d real_space_grid_search fft1d
     .type = strings
     .help = "Indexing methods to try, in order, when indexing.method is not set."
             "fft1d is the method that succeeds on sparse, narrow-wedge data from"
             "distant detector layouts, where fft3d cannot populate its grid."
-    .expert_level = 2
+    .expert_level = 1
   max_cell = None
     .type = float
     .help = "Fixed maximum cell length (Angstrom) for the basis vector search."
@@ -114,25 +114,25 @@ indexing {
             "indexing.unit_cell, or left to the DIALS nearest-neighbour estimate"
             "if no unit cell is given. The estimate is unreliable on sparse"
             "Laue-TOF spot lists."
-    .expert_level = 2
+    .expert_level = 1
   max_cell_multiplier = 1.3
     .type = float(value_min=1.0)
-    .expert_level = 3
+    .expert_level = 2
   d_min_start = 4.0
     .type = float
     .help = "Resolution limit for the first macrocycle of indexing refinement."
-    .expert_level = 2
+    .expert_level = 1
   min_spots = 10
     .type = int
     .help = "Only attempt to index an exposure with at least this many strong spots."
-    .expert_level = 2
+    .expert_level = 1
   min_indexed = 50
     .type = int
     .help = "Reject an indexing solution with fewer than this many indexed"
             "reflections, and move on to the next method in the ladder. This is"
             "a floor: min_indexed_fraction of the strong spots is used when that"
             "is the larger number."
-    .expert_level = 2
+    .expert_level = 1
   min_indexed_fraction = 0.25
     .type = float(value_min=0, value_max=1)
     .help = "Reject an indexing solution that indexes a smaller fraction of the"
@@ -140,17 +140,19 @@ indexing {
             "way an absolute count does not: a good MANDI solution indexes 65%"
             "of 227 spots, which an absolute cut of 250 would have thrown away,"
             "while a bad solution on 2300 NMX spots can index 300 of them."
-    .expert_level = 2
+    .expert_level = 1
   max_rmsd_px = 5.0
     .type = float
-    .help = "Reject an indexing solution whose positional RMSD is worse than"
-            "this, in pixels. Indexing plenty of reflections on a cell of the"
-            "right size is not enough: fft3d has been seen to take 39% of a"
+    .help = "Reject an indexing solution whose positional residual is worse"
+            "than this, in pixels. Indexing plenty of reflections on a cell of"
+            "the right size is not enough: fft3d has been seen to take 39% of a"
             "MANDI spot list at 6.1 px where another method fitted the same data"
-            "at 3.2 px. Note this RMSD covers every indexed reflection, so it"
-            "runs higher than the RMSD_X/RMSD_Y dials.index reports after"
-            "outlier rejection. None turns the test off."
-    .expert_level = 2
+            "at 3.2 px. The residual is the median over the indexed reflections,"
+            "which is close to the RMSD_X/RMSD_Y dials.index reports after"
+            "outlier rejection; a mean over all of them is dominated by the tail"
+            "a good solution can still leave, and rejects it. None turns the"
+            "test off."
+    .expert_level = 1
   target_rmsd_px = 2.0
     .type = float
     .help = "An accepted solution this good stops the ladder. Otherwise every"
@@ -158,34 +160,34 @@ indexing {
             "the first method to give an acceptable answer is not necessarily"
             "the one that fits best. None makes the first acceptable solution"
             "win, as before."
-    .expert_level = 2
+    .expert_level = 1
   seed_from_first = True
     .type = bool
     .help = "Seed the indexing of each exposure with the crystal model of the"
             "first exposure that indexed. All exposures are measurements of the"
             "same crystal, so this both enforces a consistent setting and"
             "recovers orientations that will not index on their own."
-    .expert_level = 1
+    .expert_level = 0
   outlier {
     algorithm = auto *mcd tukey sauter_poon null
       .type = choice
       .help = "Outlier rejection algorithm used in indexing refinement. The"
               "residuals of sparse Laue-TOF data carry a heavy tail that a"
               "tight cut is needed to remove."
-      .expert_level = 2
+      .expert_level = 1
     iqr_multiplier = 0.8
       .type = float
-      .expert_level = 3
+      .expert_level = 2
     separate_panels = True
       .type = bool
-      .expert_level = 3
+      .expert_level = 2
   }
   phil = None
     .type = path
     .help = "Phil options file to use for indexing. Parameters defined in the"
             "xia2.laue_tof phil scope will take precedent over identical options"
             "defined in the phil file."
-    .expert_level = 3
+    .expert_level = 2
 }
 """
 
@@ -199,14 +201,14 @@ integration {
             "is chosen; a profile method adds intensity.prf alongside them."
             "Profile fitting is not robust on all data - it can abort the whole"
             "run on a bad shoebox - so see fallback_method."
-    .expert_level = 1
+    .expert_level = 0
   fallback_method = summation
     .type = str
     .help = "What to run when a profile method fails outright, or none to let"
             "the failure stop the run. The failure and the fallback are logged,"
             "and the fallback is then used for the remaining orientations"
             "rather than failing again on each."
-    .expert_level = 2
+    .expert_level = 1
   min_profile_fraction = 0.5
     .type = float(value_min=0, value_max=1)
     .help = "The fraction of reflections a profile method has to fit for its"
@@ -216,7 +218,7 @@ integration {
             "because the profile column then exists but covers a handful of"
             "reflections. Below this fraction the summation intensities are"
             "used instead and the remaining orientations skip the profile fit."
-    .expert_level = 2
+    .expert_level = 1
   integration_type = *observed calculated
     .type = choice
     .help = "observed integrates only the reflections found by spotfinding."
@@ -227,7 +229,7 @@ integration {
             "an integration one. A calculated run makes the observed pass"
             "first, to choose the method and the mask cheaply, and keeps its"
             "output as a checkpoint."
-    .expert_level = 2
+    .expert_level = 1
   calculated_d_min = None
     .type = float
     .help = "Resolution limit used when integration_type=calculated. If None,"
@@ -235,7 +237,7 @@ integration {
             "- d = lambda / (2 sin theta) at the shortest wavelength and the"
             "largest scattering angle any pixel sees - since nothing beyond it"
             "can have been recorded."
-    .expert_level = 2
+    .expert_level = 1
   max_predicted = 250000
     .type = int(value_min=1)
     .help = "Refuse a calculated pass that would integrate more reflections"
@@ -243,10 +245,10 @@ integration {
             "so the count is checked first: a large cell with an optimistic"
             "d_min can predict millions. The message says which d_min would"
             "bring the count under the guard."
-    .expert_level = 2
+    .expert_level = 1
   background_model = constant2d constant3d linear2d *linear3d
     .type = choice
-    .expert_level = 2
+    .expert_level = 1
   mask = ellipse seed_skewness *both
     .type = choice
     .help = "Foreground/background mask method. both integrates twice, once"
@@ -257,55 +259,55 @@ integration {
             "several times the run time. The choice made on the first"
             "orientation is reused for the rest, so that every batch is"
             "integrated the same way."
-    .expert_level = 2
+    .expert_level = 1
   mask_metric = *i_over_sigma n_integrated
     .type = choice
     .help = "How to choose between the two masks when mask=both. Neither is a"
             "substitute for merging statistics, which are only available after"
             "scaling: treat the choice as a starting point and check it there."
-    .expert_level = 3
+    .expert_level = 2
   ellipse_mask_scale = 1.0
     .type = float(value_min=0.5)
-    .expert_level = 3
+    .expert_level = 2
   wavelength_range = None
     .type = floats(size=2)
     .help = "Reflections outside this wavelength range (Angstrom) are not integrated."
-    .expert_level = 2
+    .expert_level = 1
   bbox_tof_padding = 2
     .type = int
-    .expert_level = 3
+    .expert_level = 2
   bbox_xy_padding = 1
     .type = int
-    .expert_level = 3
+    .expert_level = 2
   absorption {
     enabled = False
       .type = bool
       .help = "Apply the spherical absorption correction. Requires the target"
               "spectrum parameters below to be set."
-      .expert_level = 2
+      .expert_level = 1
     sample_number_density = None
       .type = float
       .help = "Sample number density (atoms/A^3) of the crystal."
-      .expert_level = 2
+      .expert_level = 1
     sample_radius = None
       .type = float
       .help = "Sample radius (mm) of the crystal."
-      .expert_level = 2
+      .expert_level = 1
     scattering_x_section = None
       .type = float
       .help = "Sample scattering cross section (barns) of the crystal."
-      .expert_level = 2
+      .expert_level = 1
     absorption_x_section = None
       .type = float
       .help = "Sample absorption cross section (barns) of the crystal."
-      .expert_level = 2
+      .expert_level = 1
   }
   phil = None
     .type = path
     .help = "Phil options file to use for integration. Parameters defined in the"
             "xia2.laue_tof phil scope will take precedent over identical options"
             "defined in the phil file."
-    .expert_level = 3
+    .expert_level = 2
 }
 """
 
@@ -318,18 +320,18 @@ output {
             "integration.min_profile_fraction of the reflections, and the"
             "summation intensities otherwise. dials.export refuses its own auto"
             "when both columns exist, so one is always chosen here explicitly."
-    .expert_level = 1
+    .expert_level = 0
   composition = CH
     .type = str
     .help = "Chemical composition of the asymmetric unit, written into the SHELX"
             ".ins file that accompanies the exported intensities."
-    .expert_level = 2
+    .expert_level = 1
   phil = None
     .type = path
     .help = "Phil options file to use for the export. Parameters defined in the"
             "xia2.laue_tof phil scope will take precedent over identical options"
             "defined in the phil file."
-    .expert_level = 3
+    .expert_level = 2
 }
 """
 
@@ -341,7 +343,7 @@ scaling {
       .help = "Path to pointless. Defaults to $CCP4/bin/pointless, then $PATH."
               "The build must be newer than 1.13.6: older ones drop the"
               "wavelength column, which makes LAUE fatal in lawless."
-      .expert_level = 1
+      .expert_level = 0
     lauegroup = None
       .type = str
       .help = "Laue group passed to pointless. Defaults to the one implied by"
@@ -349,83 +351,83 @@ scaling {
               "is unreliable - the wavelength dependence inflates the"
               "disagreement between symmetry mates - so the group is always"
               "given rather than left to pointless."
-      .expert_level = 1
+      .expert_level = 0
     space_group = None
       .type = space_group
       .help = "Space group passed to pointless as CHOOSE SPACEGROUP. Defaults to"
               "the space group used for indexing."
-      .expert_level = 1
+      .expert_level = 0
     keywords = None
       .type = str
       .multiple = True
       .help = "Extra pointless keyword lines, appended after the generated ones."
-      .expert_level = 2
+      .expert_level = 1
   }
   lawless {
     executable = None
       .type = path
       .help = "Path to lawless (the Laue branch of aimless). Defaults to"
               "'lawless' then 'aimless' on $PATH."
-      .expert_level = 1
+      .expert_level = 0
     probe = *neutron xray
       .type = choice
-      .expert_level = 2
+      .expert_level = 1
     normalisation = *gpr chebyshev none
       .type = choice
       .help = "How the incident spectrum is modelled: a Gaussian process"
               "(NORMGPR), a Chebyshev polynomial (NORMCHEBYSHEV) or not at all."
-      .expert_level = 1
+      .expert_level = 0
     lam_min = None
       .type = float
       .help = "Wavelength range the normalisation curve covers. Defaults to the"
               "range of the data."
-      .expert_level = 2
+      .expert_level = 1
     lam_max = None
       .type = float
-      .expert_level = 2
+      .expert_level = 1
     lam_ref = None
       .type = float
       .help = "Reference wavelength the curve is normalised to (NORMLAMREF)."
               "Defaults to the middle of the range."
-      .expert_level = 2
+      .expert_level = 1
     chebyshev_degree = 6
       .type = int
-      .expert_level = 2
+      .expert_level = 1
     gpr_bins = None
       .type = int
       .help = "Training bins for the Gaussian process (NORMGPRBINS). Too many"
               "gives a curve with structure finer than the physics justifies."
-      .expert_level = 2
+      .expert_level = 1
     scales = "BATCH BFACTOR ON SECONDARY 0"
       .type = str
       .help = "The scale model, as the SCALES keyword takes it. One scale and"
               "one B factor per batch, which with a handful of stationary"
               "exposures may already be over-parameterised."
-      .expert_level = 1
+      .expert_level = 0
     sdcorrection = "NOREFINE 1.0 0.0 0.0"
       .type = str
       .help = "SDCORRECTION keyword. The default leaves the sigmas alone, so"
               "that I/sigma stays comparable with the unscaled data."
-      .expert_level = 2
+      .expert_level = 1
     anomalous = False
       .type = bool
-      .expert_level = 2
+      .expert_level = 1
     resolution = None
       .type = floats(size=2)
       .help = "Resolution range to scale over. The cutoff is a merging"
               "decision, so it belongs here rather than at integration."
-      .expert_level = 1
+      .expert_level = 0
     lambda_only = False
       .type = bool
       .help = "Run the LAMBDAONLY diagnostic, which fits the wavelength curve"
               "and stops."
-      .expert_level = 2
+      .expert_level = 1
     keywords = None
       .type = str
       .multiple = True
       .help = "Extra lawless keyword lines, appended after the generated ones,"
               "so that they win."
-      .expert_level = 2
+      .expert_level = 1
   }
 }
 """
@@ -437,7 +439,7 @@ workflow {
     .type = choice(multi=True)
     .help = "Option to turn off particular steps. Multiple choices should be of"
             "the format steps=find_spots+index"
-    .expert_level = 3
+    .expert_level = 2
 }
 """
 
