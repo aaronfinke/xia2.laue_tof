@@ -111,13 +111,27 @@ indexing {
     .type = float
     .help = "Fixed maximum cell length (Angstrom) for the basis vector search."
             "If None, it is set to max_cell_multiplier times the longest edge of"
-            "indexing.unit_cell, or left to the DIALS nearest-neighbour estimate"
-            "if no unit cell is given. The estimate is unreliable on sparse"
-            "Laue-TOF spot lists."
+            "indexing.unit_cell when a cell is given, and to max_cell_fallback"
+            "when one is not. The DIALS nearest-neighbour estimate is never"
+            "used: it is unreliable on sparse Laue-TOF spot lists, and when it"
+            "comes out too small it does not fail, it returns a truncated cell"
+            "that passes every acceptance test."
     .expert_level = 1
   max_cell_multiplier = 1.3
     .type = float(value_min=1.0)
     .expert_level = 2
+  max_cell_fallback = 150
+    .type = float
+    .help = "The max_cell used when neither indexing.max_cell nor"
+            "indexing.unit_cell is given. A fixed value beats the"
+            "nearest-neighbour estimate because Laue-TOF spot lists are sparse:"
+            "on an NMX rubredoxin run the estimate returned 23.3 A for a 44.1 A"
+            "axis, halving the cell while still indexing 31% of the spots at"
+            "0.59 px, so nothing downstream noticed. Raise it for a cell with an"
+            "edge longer than this - the MANDI test case, at 65.7 65.7 151.9, is"
+            "one - or better, give indexing.unit_cell, which is known for most"
+            "Laue-TOF experiments and makes this parameter moot."
+    .expert_level = 1
   d_min_start = 4.0
     .type = float
     .help = "Resolution limit for the first macrocycle of indexing refinement."

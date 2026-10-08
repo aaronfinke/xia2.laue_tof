@@ -72,13 +72,20 @@ is in the history at [Step 0](#step-0-new-tof-binning-with-essnmx).
 
 1. ~~Integrate everything the geometry allows, not only the observed spots~~ —
    done 2026-09-22, see § *Resolution: observed, then calculated*.
-2. **Give `indexing.max_cell` a real default.** The single highest-yield fix
-   outstanding, and the plan already called for it — see § *Indexing defaults*,
-   where the study's own conclusion is that *every* difficult-layout success
-   used a fixed value. The code derives one only from a user-supplied
-   `unit_cell` (`laue_tof.py:229`); with no cell it falls through to the DIALS
-   nearest-neighbour estimate, which the comment immediately above it calls
-   unreliable. Measured cost on rubredoxin, 2026-10-08 (below).
+2. ~~Give `indexing.max_cell` a real default~~ — done 2026-10-08.
+   `max_cell` is now **always fixed** and the DIALS nearest-neighbour estimate is
+   never used: `max_cell_multiplier` × the longest edge when
+   `indexing.unit_cell` is given, and otherwise the new
+   `indexing.max_cell_fallback`, **150 Å** (user: a Laue-TOF experiment with an
+   unknown cell is rare, and one with an edge over 150 Å rarer still). Verified
+   at 150 on both ends of the range — rubredoxin (34 × 35 × 44) indexes
+   484/872 at 0.43 px, no worse than at 60, and PPase config1
+   (primitive 71.7 × 71.7 × 114.5) is unchanged, where the estimate happens to
+   land at 149.4 Å anyway. The startup log now says which of the two rules
+   supplied the value. **Known limit**: the MANDI test case is
+   `65.73 65.73 151.88`, whose `c` is longer than the fallback — it supplies a
+   `unit_cell`, so the derived rule covers it, but a MANDI-like run indexed blind
+   would need the fallback raised.
 3. Build the rest of the **retry ladder and the acceptance ranking** that
    § *Indexing defaults* specifies and the code does not: vary threshold
    algorithm and `min_spot_size` as well as `method`, and rank accepted
@@ -617,7 +624,7 @@ positional RMSD from 2.3 px to 0.59 px. The changes worth baking in as
 | `spotfinder.filter.min_spot_size` | 6 (ToF auto) | **15** (search 8–25) | the largest single improvement. 6 admits small split peaks; raising it drops positional RMSD from 2.3 px to 0.6–0.8 px on the same data, at some cost in reflection count. Balanced picks land at 14–24 in five of six near layouts |
 | `spotfinder.threshold.algorithm` | `radial_profile` for ToF | **`dispersion_extended`**, keep `radial_profile` as first fallback | wins on four of six near PPase layouts. On the CcO data `radial_profile` wins more often — so this is a *default*, not a rule, and both must stay easy to select |
 | `indexing.method` | `fft3d` | **`fft3d`** near, **`fft1d`** for distant/sparse layouts | `fft1d` is the finding of the study: the only method that indexed config8 and config10 (1 m panels). Its 1-D projection does not need a well-populated 3-D reciprocal-space grid, which a narrow recorded wedge cannot provide. `real_space_grid_search` is the other near-layout winner |
-| `indexing.max_cell` | Auto | **fixed**, ≈ 1.2–1.4 × longest cell edge (120–150 Å for PPase, ≈ 230 Å for CcO) | nearest-neighbour estimation is unreliable on sparse Laue-TOF spot lists; *every* difficult-layout success used a fixed value |
+| `indexing.max_cell` | Auto | **always fixed** — `max_cell_multiplier` (1.3) × the longest edge of a given `unit_cell`, else `max_cell_fallback` = 150 Å. Study range: 120–150 Å for PPase, ≈ 230 Å for CcO | nearest-neighbour estimation is unreliable on sparse Laue-TOF spot lists; *every* difficult-layout success used a fixed value. Implemented 2026-10-08 |
 | `refinement.reflections.outlier.algorithm` | `auto` | **`mcd`**, `tukey.iqr_multiplier` 0.6–1.0, `separate_panels=True` for multi-panel | the distant layouts carry a heavy residual tail (median 0.55 px, p99 26 px, p99/p50 = 47.6 against 8.9 for a good layout). A tight cut is what let config8 index at all |
 | `indexing.refinement_protocol.d_min_start` | Auto | **≈ 4.0** | starting low-resolution helps the difficult layouts; immaterial for the near ones |
 
@@ -1265,15 +1272,18 @@ orientation is one experiment, not thousands of stills).
   keep `indexing.method` (e.g. `pink_indexer`) exposed as a fallback for hard cases.
   Supplying `unit_cell`+`space_group` remains the most robust path — and note that
   every difficult-layout success in the NMX study also needed a **fixed
-  `max_cell`**, which without a known cell has to come from the user.
-  **No longer only a risk: this is now a measured failure.** On rubredoxin
-  (2026-10-08, see *Status*) the nearest-neighbour estimate came back at 23.3 Å
-  for a 44.1 Å axis and returned a halved cell that passed every acceptance
-  check — right space group, 0.59 px residual, 31 % indexed — so nothing in the
-  pipeline flagged it. **Silently trusting the estimate is worse than having no
-  default**, because the wrong answer looks like a good one. At minimum, compare
-  the accepted cell's longest axis against the estimate that was used and warn
-  when it exceeds it; that one test would have caught this.
+  `max_cell`**. **Addressed 2026-10-08**, because it was no longer only a risk:
+  on rubredoxin the nearest-neighbour estimate came back at 23.3 Å for a 44.1 Å
+  axis and returned a halved cell that passed every acceptance check — right
+  space group, 0.59 px residual, 31 % indexed — so nothing in the pipeline
+  flagged it. Trusting the estimate silently is worse than having no default,
+  because the wrong answer looks like a good one. `max_cell` is therefore always
+  fixed now (`indexing.max_cell_fallback`, 150 Å, when there is no cell to
+  derive it from). **The failure mode is not gone, only moved**: a cell with an
+  edge longer than the fallback truncates exactly the same way, just as quietly.
+  The warning that would actually close this — compare the accepted cell's
+  longest axis against the `max_cell` that was used, and say so when it is
+  within reach of it — is still not written, and is the cheapest remaining guard.
 - **Some geometries never autoindex.** config7 and config9 produced nothing in 480
   and 330 de-novo trials, including transfers of the recipes that cracked their
   near-identical sibling — a property of what those layouts record, not of the

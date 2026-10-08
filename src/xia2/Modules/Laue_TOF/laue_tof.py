@@ -227,12 +227,18 @@ class IndexingParams:
                 )
 
         max_cell = indexing.max_cell
-        if max_cell is None and indexing.unit_cell:
-            # The nearest-neighbour estimate is unreliable on the sparse spot
-            # lists that Laue-TOF data gives, so derive a fixed value instead.
-            max_cell = indexing.max_cell_multiplier * max(
-                indexing.unit_cell.parameters()[:3]
-            )
+        if max_cell is None:
+            # Always fix max_cell. The DIALS nearest-neighbour estimate is
+            # unreliable on the sparse spot lists Laue-TOF data gives, and it
+            # fails quietly: an estimate that comes out too small returns a
+            # truncated cell which indexes fewer spots but refines well enough
+            # to pass every acceptance test here.
+            if indexing.unit_cell:
+                max_cell = indexing.max_cell_multiplier * max(
+                    indexing.unit_cell.parameters()[:3]
+                )
+            else:
+                max_cell = indexing.max_cell_fallback
 
         return cls(
             params.space_group,
@@ -469,7 +475,15 @@ def _log_setup(setup: LaueTOFSetup) -> None:
     else:
         xia2_logger.info(f"Indexing method: {indexing.methods[0]}")
     if indexing.max_cell:
-        xia2_logger.info(f"Using fixed max_cell of {indexing.max_cell:.1f} Angstrom")
+        if indexing.unit_cell:
+            source = "from the longest edge of the given unit cell"
+        else:
+            source = (
+                "a fixed default, since no unit cell was given. Raise"
+                " indexing.max_cell, or give indexing.unit_cell, if the cell has"
+                " a longer edge than this"
+            )
+        xia2_logger.info(f"Using max_cell = {indexing.max_cell:.1f} Angstrom, {source}")
 
     integration = setup.integration_params
     if integration.incident_run:
