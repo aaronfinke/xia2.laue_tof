@@ -45,14 +45,6 @@ space_group = None
   .type = space_group
   .help = "Space group to be used for indexing and integration."
   .expert_level = 0
-d_min = None
-  .type = float
-  .help = "High resolution cutoff for spotfinding."
-  .expert_level = 0
-d_max = None
-  .type = float
-  .help = "Low resolution cutoff for spotfinding."
-  .expert_level = 0
 multiprocessing {
   nproc = Auto
     .type = int

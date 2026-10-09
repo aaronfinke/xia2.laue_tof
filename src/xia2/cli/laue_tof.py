@@ -43,6 +43,31 @@ phil_scope = iotbx.phil.parse(full_phil_str)
 xia2_logger = logging.getLogger(__name__)
 
 
+def _reject_removed_parameters(args) -> None:
+    """
+    Stop on a top-level d_min= or d_max=, which used to cut the spot list.
+
+    They were removed because they cannot work on TOF data, and leaving it at
+    that would be worse than keeping them: phil resolves an unambiguous suffix,
+    so `d_min=1.8` now quietly becomes `integration.calculated_d_min=1.8` and
+    changes which reflections are integrated instead of failing. An old command
+    line therefore has to be refused rather than reinterpreted.
+    """
+    for arg in args:
+        name = arg.split("=", 1)[0].strip()
+        if name in ("d_min", "d_max"):
+            sys.exit(
+                f"{name} has been removed. It set a resolution cut for"
+                " spotfinding, which DIALS cannot apply to time-of-flight data:"
+                " the cut is a pixel mask, and building one needs a fixed s0"
+                " that a polychromatic beam does not have, so dials.find_spots"
+                " fails with 'PolychromaticBeam has no fixed s0'.\nIf you meant"
+                " the resolution to integrate to, that is"
+                " integration.calculated_d_min, which this would otherwise have"
+                " silently become."
+            )
+
+
 def run(args=sys.argv[1:]):
     """
     Parse the command line input, setup logging and run the Laue-TOF pipeline.
@@ -57,6 +82,7 @@ def run(args=sys.argv[1:]):
         check_format=False,
         epilog=__doc__,
     )
+    _reject_removed_parameters(args)
     params, _ = parser.parse_args(args=args, show_diff_phil=False)
 
     xia2.Handlers.Streams.setup_logging(

@@ -458,6 +458,16 @@ def find_spots(
 
     One call covers every exposure, and the strong spots come back in a single
     table whose `id` column says which exposure each spot belongs to.
+
+    There is deliberately no resolution cut here. `spotfinder.filter.d_min` and
+    `d_max` cannot work on TOF data: both route through
+    `dials/util/masking.py::_apply_resolution_mask`, which builds a
+    `ResolutionMaskGenerator` from the beam, and a `PolychromaticBeam` has no
+    fixed `s0` to build it from - `dials.find_spots` dies with
+    `PolychromaticBeam has no fixed s0` at `beam.h(741)`. A pixel mask is the
+    wrong mechanism anyway, since on a Laue-TOF image the resolution of a pixel
+    depends on the wavelength of the neutron that arrived there. A cut would
+    have to be made in reflection space, after the wavelength is known.
     """
     command = [
         _executable("dials.find_spots"),
@@ -471,10 +481,6 @@ def find_spots(
         command.insert(1, os.fspath(params.phil))
     if params.max_spot_size:
         command.append(f"spotfinder.filter.max_spot_size={params.max_spot_size}")
-    if params.d_min:
-        command.append(f"spotfinder.filter.d_min={params.d_min}")
-    if params.d_max:
-        command.append(f"spotfinder.filter.d_max={params.d_max}")
 
     xia2_logger.notice(banner("Spotfinding"))  # type: ignore
     _run_program(command, working_directory, "dials.find_spots")

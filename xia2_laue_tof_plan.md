@@ -92,11 +92,16 @@ is in the history at [Step 0](#step-0-new-tof-binning-with-essnmx).
    compare the accepted cell's longest edge against the `max_cell` actually
    used and say so when it is close. A cell longer than the 150 Å fallback
    still truncates silently, exactly as the nearest-neighbour estimate did.
-4. **Decide what to do about `spotfinding.d_min` / `d_max`.** Both are dead on
-   TOF data — they route through `ResolutionMaskGenerator`, which needs a fixed
-   `s0` that a `PolychromaticBeam` has not, so any use crashes
-   `dials.find_spots`. Either drop them from the phil or reimplement the cut in
-   reflection space; a pixel mask cannot work here. See the rubredoxin block.
+4. ~~Decide what to do about `spotfinding.d_min` / `d_max`~~ — dropped
+   2026-10-09 (user). Both were dead on TOF data: they route through
+   `ResolutionMaskGenerator`, which needs a fixed `s0` that a
+   `PolychromaticBeam` has not, so any use crashed `dials.find_spots`. Removing
+   them was not enough on its own — phil resolves an unambiguous suffix, so a
+   bare `d_min=1.8` then became `integration.calculated_d_min=1.8` and quietly
+   changed what was integrated, so the CLI now refuses a top-level `d_min=` or
+   `d_max=` and says where the resolution-to-integrate-to lives instead. If a
+   spot-list resolution cut is ever wanted it has to be made in reflection
+   space, after the wavelength of each spot is known.
 5. **Finish `tests/regression/test_laue_tof.py`, then the docs.** Still 3 tests,
    all gated on a MANDI file that may not be present; no SXD case, no converter
    unit test, and `doc/sphinx/` has no laue_tof page at all. The multi-exposure
@@ -443,13 +448,37 @@ Verified on `rubr_splitbeamstop_mosaicity/...18545527`:
 | N=2 (one indexable file copied twice) | both index, **one** integrate call, 772 reflections, **2 batches** of 386, `validate_unmerged_mtz` passes at 2 batches, refine at 28 parameters |
 | N=4, 200 bins | exercises the failure paths: exposure 1 accepted at rung 1 and dropped from later rungs, 2 and 3 walk all three methods then the seeded rung, 4 skipped on `min_spots` (8 spots), run continues on the one that indexed |
 
-**TOF binning decides whether the cell is halved on this crystal**, independent
-of `max_cell`. At 100 bins the a axis comes out 34.4 Å; at both 50 and 200 bins
-it is 17.2 Å, with `max_cell=150` in all three. More evidence that binning is a
-pipeline parameter and not a fixed default. The 50-bin reduction is also where
-`min_indexed_fraction` bites hardest: spot lists of 8–9 k are almost all junk,
-`fft1d` finds a 1.50 px solution on 1283 of 9102 spots, and the 25 % gate
-rejects it. Another argument for item 3's ranking change.
+**When indexing blind, the TOF binning decides whether the cell is halved.** At
+100 bins the a axis comes out 34.4 Å; at both 50 and 200 bins it is 17.2 Å, with
+`max_cell=150` in all three — so `max_cell` is not what rescues it. **Giving the
+cell is**: with `indexing.unit_cell` and `space_group` supplied, the same 50-bin
+data refines to `34.70 35.56 44.42 90 90 90`, the full cell, and the median
+residual falls from 8.42 px to 1.57 px. (An earlier version of this paragraph
+said the binning decided it outright, which was measured without a known cell
+and is only true of blind indexing.)
+
+**Run these test datasets with the cell and symmetry given** (user, 2026-10-09):
+it is rare not to know them in a Laue-TOF experiment, so a blind run is the
+unusual case, not the default one to test. The ground truth for the rubredoxin
+simulations is in the McStas input, `Rubredoxin_solvent.lau`:
+
+```
+# Perdeuterated rubredoxin (F^2calc), Fe (III), C267-D386-N62-O87-S5'
+# SPCGRP P 21 21 21 (19) Orthorhombic
+# a=34.375, b=35.183, c=43.994; alpha=90.0, beta=90.0, gamma=90.0;
+```
+
+so `space_group="P 21 21 21" indexing.unit_cell=34.375,35.183,43.994,90,90,90`,
+which derives `max_cell` = 57.2 Å. On the 100-bin data that takes the N=2 run to
+482/872 at **0.45 px** against 486/872 at 0.60 px blind — slightly fewer
+reflections, since the constrained cell rejects some, at a third less residual.
+The blind numbers elsewhere in this section predate this and were measured
+without it.
+
+The 50-bin reduction is also where `min_indexed_fraction` bites hardest, with or
+without a cell: spot lists of 8–9 k are almost all junk, the best solution is
+1.57–1.71 px on ~1300 of 9102 spots, and the 25 % gate rejects every one of
+them. The strongest argument for the ranking change, item 1.
 
 **Environment**: `.venv/` in this repo is the interpreter for all of it — see
 [Environment](#environment-and-external-programs) below. `dials_known_orientation_centred_cell_issue.md`

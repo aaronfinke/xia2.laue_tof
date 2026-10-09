@@ -160,8 +160,6 @@ class SpotfindingParams:
     max_spot_size: int | None = None
     threshold_algorithm: str = "dispersion_extended"
     max_strong: int = 35000
-    d_min: float | None = None
-    d_max: float | None = None
     nproc: int = 1
     phil: pathlib.Path | None = None
 
@@ -172,8 +170,6 @@ class SpotfindingParams:
             params.spotfinding.max_spot_size,
             params.spotfinding.threshold_algorithm,
             params.spotfinding.max_strong,
-            params.d_min,
-            params.d_max,
             params.multiprocessing.nproc,
             _resolved_file(params.spotfinding.phil),
         )
