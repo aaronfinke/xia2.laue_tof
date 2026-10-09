@@ -1,6 +1,6 @@
 # xia2.laue_tof — neutron Laue time-of-flight processing pipeline
 
-## Status (2026-10-08)
+## Status (2026-10-09)
 
 The pipeline runs end to end — import → find_spots → index → refine →
 tof_integrate → combine → export → unmerged MTZ → pointless → lawless → report.
@@ -59,47 +59,55 @@ check, and the MANDI route mutates the user's raw files. **To be re-added**, as 
 separate step that does not classify input on the pipeline's behalf; the old code
 is in the history at [Step 0](#step-0-new-tof-binning-with-essnmx).
 
-**Landed since this section was last written (2026-09-21):**
+**Done, most recent first:**
 
-| commit | date | what |
-|---|---|---|
-| `589b452f` | 09-22 | Lorentz to lawless — **reversed by `d62b2300`**, see above |
-| `d62b2300` | 09-24 | integrate to the geometric limit; stop guessing about input; Lorentz hard-coded back on |
-| `000554d0` | 09-26 | apply an ISAW `.DetCal` detector calibration at import |
-| `bef929bd` | 10-08 | expert levels in the phil help |
+| commit | date | what | written up in |
+|---|---|---|---|
+| `48e54cc5` | 10-08 | every exposure of a run processed together, `joint_indexing=False`, `dials.refine` at `panels=hierarchical hierarchy_level=1` | § *One run, processed together* |
+| `816b6d56` | 10-08 | `indexing.max_cell` always fixed; new `max_cell_fallback` = 150 Å | § *Indexing defaults*, and the rubredoxin block |
+| `18c69944` | 10-08 | this Status section brought back in line with the code | — |
+| `bef929bd` | 10-08 | expert levels in the phil help | — |
+| `000554d0` | 09-26 | ISAW `.DetCal` detector calibration applied at import | `apply_detector_calibration` |
+| `d62b2300` | 09-24 | integrate to the geometric limit; stop guessing about input; Lorentz hard-coded back on | § *Resolution: observed, then calculated* |
+| `589b452f` | 09-22 | Lorentz to lawless — **reversed by `d62b2300`**, see above | — |
+| `94ad4a4b` `863a78db` `1e7cce04` | 09-21 | scaling tail, unmerged MTZ, xia2-format report | below in this section |
 
 **Next, in order:**
 
-1. ~~Integrate everything the geometry allows, not only the observed spots~~ —
-   done 2026-09-22, see § *Resolution: observed, then calculated*.
-2. ~~Give `indexing.max_cell` a real default~~ — done 2026-10-08.
-   `max_cell` is now **always fixed** and the DIALS nearest-neighbour estimate is
-   never used: `max_cell_multiplier` × the longest edge when
-   `indexing.unit_cell` is given, and otherwise the new
-   `indexing.max_cell_fallback`, **150 Å** (user: a Laue-TOF experiment with an
-   unknown cell is rare, and one with an edge over 150 Å rarer still). Verified
-   at 150 on both ends of the range — rubredoxin (34 × 35 × 44) indexes
-   484/872 at 0.43 px, no worse than at 60, and PPase config1
-   (primitive 71.7 × 71.7 × 114.5) is unchanged, where the estimate happens to
-   land at 149.4 Å anyway. The startup log now says which of the two rules
-   supplied the value. **Known limit**: the MANDI test case is
-   `65.73 65.73 151.88`, whose `c` is longer than the fallback — it supplies a
-   `unit_cell`, so the derived rule covers it, but a MANDI-like run indexed blind
-   would need the fallback raised.
-3. Build the rest of the **retry ladder and the acceptance ranking** that
-   § *Indexing defaults* specifies and the code does not: vary threshold
-   algorithm and `min_spot_size` as well as `method`, and rank accepted
-   solutions on the geometric mean of indexed count, indexed fraction and RMSD
-   rather than on RMSD alone (`data_integration.py:653`).
-4. ~~Process all exposures of one run together~~ — done 2026-10-08. The whole
-   set now goes to each DIALS program at once, in one `run/` directory instead
-   of one `orientation_N/` per exposure, and `dials.refine` always gets
-   `detector.panels=hierarchical`. See § *One run, processed together* below
-   for what that required.
-5. Finish `tests/regression/test_laue_tof.py` (SXD, the converter unit test),
-   then the docs. Still 3 tests, all gated on a MANDI file that may not be
-   present; `doc/sphinx/` has no laue_tof page at all.
-6. Re-add TOF binning as a separate step (above).
+1. **Rank indexing solutions on more than RMSD.** `data_integration.py:902`
+   keeps the best accepted attempt by median RMSD alone; § *Indexing defaults*
+   calls for the geometric mean of indexed count, indexed fraction and RMSD.
+   The 50-bin rubredoxin reduction is the case that needs it: `fft1d` finds a
+   **1.50 px** solution on 1283 of 9102 spots and `min_indexed_fraction` (0.25)
+   throws it away, because the denominator is mostly junk that no lattice was
+   going to index. Doing this well probably means judging the fraction over a
+   resolution range the data actually support rather than the whole spot list.
+2. **Extend the ladder past `indexing.method`.** § *Indexing defaults* calls for
+   rungs over the threshold algorithm and `min_spot_size` too; only `method`
+   varies. This is now cheap to add, since the ladder already re-runs a subset
+   of exposures per rung — but a `min_spot_size` rung means re-running
+   `dials.find_spots`, which the current ladder does not do.
+3. **Warn when a cell is up against `max_cell`.** The cheapest remaining guard
+   against the failure item 2 of the done list only moved rather than removed:
+   compare the accepted cell's longest edge against the `max_cell` actually
+   used and say so when it is close. A cell longer than the 150 Å fallback
+   still truncates silently, exactly as the nearest-neighbour estimate did.
+4. **Decide what to do about `spotfinding.d_min` / `d_max`.** Both are dead on
+   TOF data — they route through `ResolutionMaskGenerator`, which needs a fixed
+   `s0` that a `PolychromaticBeam` has not, so any use crashes
+   `dials.find_spots`. Either drop them from the phil or reimplement the cut in
+   reflection space; a pixel mask cannot work here. See the rubredoxin block.
+5. **Finish `tests/regression/test_laue_tof.py`, then the docs.** Still 3 tests,
+   all gated on a MANDI file that may not be present; no SXD case, no converter
+   unit test, and `doc/sphinx/` has no laue_tof page at all. The multi-exposure
+   restructure is untested except by hand, which makes this more pressing than
+   it was: the N=2 check used one indexable file copied twice, and nothing in
+   the suite would catch a regression in the exposure/`imageset_id` bookkeeping.
+6. **Re-add TOF binning as a separate step** that does not classify input on the
+   pipeline's behalf (see *Binning removed*, above). Worth more than it looks:
+   on rubredoxin the binning, not `max_cell`, is what decides whether the a axis
+   comes out 34.4 Å or halved to 17.2 Å, so the bin count is a parameter a run
+   may need to scan rather than inherit.
 
 **The scaling tail is written** (2026-09-21): `laue_tof_scale.py`, wired in as
 the `pointless` and `lawless` workflow steps, with the `scaling{}` phil scope.
