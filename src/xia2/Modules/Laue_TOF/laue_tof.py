@@ -350,14 +350,29 @@ class ExportParams:
     intensity: str = "auto"
     min_profile_fraction: float = 0.5
     composition: str = "CH"
+    d_min: float | None = None
+    d_max: float | None = None
     phil: pathlib.Path | None = None
 
     @classmethod
     def from_phil(cls, params: iotbx.phil.scope_extract) -> ExportParams:
+        if params.d_min is not None and params.d_max is not None:
+            if params.d_min >= params.d_max:
+                raise ValueError(
+                    f"d_min ({params.d_min}) must be a smaller spacing than"
+                    f" d_max ({params.d_max}): they are resolutions in"
+                    " Angstrom, so d_min is the high resolution end"
+                )
+        for name in ("d_min", "d_max"):
+            value = getattr(params, name)
+            if value is not None and value <= 0:
+                raise ValueError(f"{name} must be a positive resolution in Angstrom")
         return cls(
             params.output.intensity,
             params.integration.min_profile_fraction,
             params.output.composition,
+            params.d_min,
+            params.d_max,
             _resolved_file(params.output.phil),
         )
 

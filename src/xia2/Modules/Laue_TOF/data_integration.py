@@ -1324,10 +1324,48 @@ def integrate(
     return integrated
 
 
+def _apply_resolution_limits(
+    table: flex.reflection_table,
+    experiments,
+    d_min: float | None,
+    d_max: float | None,
+) -> flex.reflection_table:
+    """
+    Keep only the reflections inside the requested resolution range.
+
+    The cut is made here, on reflections that know their own d spacing, because
+    it cannot be made at spotfinding: DIALS applies a resolution cut as a pixel
+    mask, which needs a fixed s0 that a `PolychromaticBeam` has not got, and on
+    a Laue-TOF image the resolution a pixel corresponds to depends on the
+    wavelength of the neutron that arrived there. Cutting after integration also
+    costs nothing to change, where re-integrating costs everything.
+    """
+    if d_min is None and d_max is None:
+        return table
+    d = table["d"] if "d" in table else table.compute_d(experiments)
+    keep = flex.bool(table.size(), True)
+    if d_min is not None:
+        keep &= d >= d_min
+    if d_max is not None:
+        keep &= d <= d_max
+    limits = " to ".join(f"{v:.3f} A" for v in (d_max, d_min) if v is not None)
+    xia2_logger.info(
+        f"Keeping {keep.count(True)} of {table.size()} reflections within"
+        f" {limits} (d_min/d_max), by their own d spacing"
+    )
+    if not keep.count(True):
+        raise ValueError(
+            "The d_min/d_max range leaves no reflections. The integrated data"
+            f" spans {min(d):.3f}-{max(d):.3f} A."
+        )
+    return table.select(keep)
+
+
 def combine(
     working_directory: pathlib.Path,
     integrated_directory: pathlib.Path,
     results: list[ExposureResult],
+    params: ExportParams,
 ) -> tuple[pathlib.Path, pathlib.Path]:
     """
     Split the run's integrated output per exposure and write it ready to export.
@@ -1335,7 +1373,8 @@ def combine(
     The exposures were integrated together, so this no longer concatenates
     files; it gives each exposure its own experiment identifier and its own
     batch, so that the exported intensities can be scaled per setting
-    downstream.
+    downstream. Any d_min/d_max is applied here, so that everything downstream -
+    the SHELX export, the unmerged MTZ and the scaling - sees the same cut.
     """
     indexed = [result for result in results if result.indexed]
     if not indexed:
@@ -1347,6 +1386,7 @@ def combine(
         integrated_directory / "integrated.expt", check_format=False
     )
     table = flex.reflection_table.from_file(integrated_directory / "integrated.refl")
+    table = _apply_resolution_limits(table, expts, params.d_min, params.d_max)
     tables = parse_multiple_datasets([table])
     experiments = ExperimentList()
     experiments.extend(expts)
@@ -1643,7 +1683,7 @@ def run_data_integration(
 
     scale_directory = root_working_directory / "scale"
     experiments_file, reflections_file = combine(
-        scale_directory, run_directory, results
+        scale_directory, run_directory, results, setup.export_params
     )
     if "export" in setup.options.steps:
         export_shelx(scale_directory, setup.export_params)

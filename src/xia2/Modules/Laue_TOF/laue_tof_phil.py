@@ -45,6 +45,25 @@ space_group = None
   .type = space_group
   .help = "Space group to be used for indexing and integration."
   .expert_level = 0
+d_min = None
+  .type = float
+  .help = "High resolution limit of the data that is kept, in Angstrom."
+          "Applied to the integrated reflections, by their own d spacing, on"
+          "the way into the combined files - so it reaches the SHELX export,"
+          "the unmerged MTZ and the scaling, and nothing is re-integrated to"
+          "change it. It is deliberately not a spotfinding cut: DIALS applies"
+          "that as a pixel mask, which needs a fixed s0 that a polychromatic"
+          "beam has not got, and on a Laue-TOF image the resolution a pixel"
+          "corresponds to depends on the wavelength that arrived there anyway."
+          "Where to cut is a merging decision, so prefer to leave this unset"
+          "and take it from CC-half after scaling."
+  .expert_level = 0
+d_max = None
+  .type = float
+  .help = "Low resolution limit of the data that is kept, in Angstrom. As"
+          "d_min, applied to the integrated reflections rather than to the"
+          "spot list."
+  .expert_level = 0
 multiprocessing {
   nproc = Auto
     .type = int

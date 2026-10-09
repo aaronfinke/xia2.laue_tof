@@ -92,16 +92,25 @@ is in the history at [Step 0](#step-0-new-tof-binning-with-essnmx).
    compare the accepted cell's longest edge against the `max_cell` actually
    used and say so when it is close. A cell longer than the 150 Å fallback
    still truncates silently, exactly as the nearest-neighbour estimate did.
-4. ~~Decide what to do about `spotfinding.d_min` / `d_max`~~ — dropped
-   2026-10-09 (user). Both were dead on TOF data: they route through
-   `ResolutionMaskGenerator`, which needs a fixed `s0` that a
-   `PolychromaticBeam` has not, so any use crashed `dials.find_spots`. Removing
-   them was not enough on its own — phil resolves an unambiguous suffix, so a
-   bare `d_min=1.8` then became `integration.calculated_d_min=1.8` and quietly
-   changed what was integrated, so the CLI now refuses a top-level `d_min=` or
-   `d_max=` and says where the resolution-to-integrate-to lives instead. If a
-   spot-list resolution cut is ever wanted it has to be made in reflection
-   space, after the wavelength of each spot is known.
+4. ~~Decide what to do about `d_min` / `d_max`~~ — **redefined** 2026-10-09,
+   not removed. As spotfinding cuts they were dead: both routed through
+   `dials/util/masking.py::_apply_resolution_mask`, which builds a
+   `ResolutionMaskGenerator` from the beam, and a `PolychromaticBeam` has no
+   fixed `s0`, so any use crashed `dials.find_spots` with
+   *"PolychromaticBeam has no fixed s0"* at `beam.h(741)`. They now cut the
+   **integrated reflections** instead, in `combine`, by each reflection's own
+   `d` — which is the only place the cut can be made, since the resolution a
+   Laue-TOF pixel corresponds to depends on the wavelength that arrived there.
+   The cut lands before the SHELX export, the unmerged MTZ and the scaling, so
+   all three see the same data, and changing it costs nothing where
+   re-integrating would cost everything.
+   Deleting the two names instead was tried first and was worse: phil resolves
+   an unambiguous suffix, so a bare `d_min=1.8` silently became
+   `integration.calculated_d_min=1.8` and changed what was integrated. Keeping
+   the names and giving them a meaning that works removes that trap without the
+   pipeline having to police its own old spellings.
+   Where to cut is still a merging decision — prefer leaving both unset and
+   taking the limit from CC½ after scaling.
 5. **Finish `tests/regression/test_laue_tof.py`, then the docs.** Still 3 tests,
    all gated on a MANDI file that may not be present; no SXD case, no converter
    unit test, and `doc/sphinx/` has no laue_tof page at all. The multi-exposure
