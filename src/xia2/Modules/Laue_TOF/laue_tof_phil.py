@@ -48,15 +48,12 @@ space_group = None
 d_min = None
   .type = float
   .help = "High resolution limit of the data that is kept, in Angstrom."
-          "Applied to the integrated reflections, by their own d spacing, on"
-          "the way into the combined files - so it reaches the SHELX export,"
-          "the unmerged MTZ and the scaling, and nothing is re-integrated to"
-          "change it. It is deliberately not a spotfinding cut: DIALS applies"
-          "that as a pixel mask, which needs a fixed s0 that a polychromatic"
-          "beam has not got, and on a Laue-TOF image the resolution a pixel"
-          "corresponds to depends on the wavelength that arrived there anyway."
-          "Where to cut is a merging decision, so prefer to leave this unset"
-          "and take it from CC-half after scaling."
+          "Applied to the integrated reflections by their own d spacing, so it"
+          "reaches the SHELX export, the MTZ and the scaling without"
+          "re-integrating. Not a spotfinding cut: a DIALS one is a pixel mask,"
+          "and a Laue-TOF pixel has no single resolution. Where to cut is a"
+          "merging decision - prefer to leave this unset and take it from"
+          "CC-half after scaling."
   .expert_level = 0
 d_max = None
   .type = float
@@ -137,13 +134,11 @@ indexing {
     .type = float
     .help = "The max_cell used when neither indexing.max_cell nor"
             "indexing.unit_cell is given. A fixed value beats the"
-            "nearest-neighbour estimate because Laue-TOF spot lists are sparse:"
-            "on an NMX rubredoxin run the estimate returned 23.3 A for a 44.1 A"
-            "axis, halving the cell while still indexing 31% of the spots at"
-            "0.59 px, so nothing downstream noticed. Raise it for a cell with an"
-            "edge longer than this - the MANDI test case, at 65.7 65.7 151.9, is"
-            "one - or better, give indexing.unit_cell, which is known for most"
-            "Laue-TOF experiments and makes this parameter moot."
+            "nearest-neighbour estimate, which is unreliable on sparse"
+            "Laue-TOF spot lists: on NMX rubredoxin it returned 23.3 A for a"
+            "44.1 A axis and halved the cell, while still passing every"
+            "acceptance check. Raise it for a longer edge than this, or better,"
+            "give indexing.unit_cell and make it moot."
     .expert_level = 1
   d_min_start = 4.0
     .type = float
@@ -171,22 +166,18 @@ indexing {
   max_rmsd_px = 5.0
     .type = float
     .help = "Reject an indexing solution whose positional residual is worse"
-            "than this, in pixels. Indexing plenty of reflections on a cell of"
-            "the right size is not enough: fft3d has been seen to take 39% of a"
-            "MANDI spot list at 6.1 px where another method fitted the same data"
-            "at 3.2 px. The residual is the median over the indexed reflections,"
-            "which is close to the RMSD_X/RMSD_Y dials.index reports after"
-            "outlier rejection; a mean over all of them is dominated by the tail"
-            "a good solution can still leave, and rejects it. None turns the"
-            "test off."
+            "than this, in pixels. Indexing plenty of reflections on a cell"
+            "of the right size is not enough: fft3d has taken 39% of a MANDI"
+            "spot list at 6.1 px where another method fitted it at 3.2 px."
+            "The median, not the mean, which is dominated by the tail a good"
+            "solution can still leave. None turns the test off."
     .expert_level = 1
   target_rmsd_px = 2.0
     .type = float
     .help = "An accepted solution this good stops the ladder. Otherwise every"
-            "method in the ladder is tried and the best by RMSD is kept, since"
-            "the first method to give an acceptable answer is not necessarily"
-            "the one that fits best. None makes the first acceptable solution"
-            "win, as before."
+            "method is tried and the best by RMSD kept, the first acceptable"
+            "answer not necessarily being the best fit. None makes the first"
+            "one win."
     .expert_level = 1
   seed_from_first = True
     .type = bool
@@ -249,14 +240,12 @@ integration {
     .expert_level = 1
   integration_type = *observed calculated
     .type = choice
-    .help = "observed integrates only the reflections found by spotfinding."
-            "calculated integrates every reflection the geometry predicts, out"
-            "to calculated_d_min, which is two to three orders of magnitude"
-            "more of them - most weak, which is the point, since where to cut"
-            "is a merging decision taken on CC-half after scaling rather than"
-            "an integration one. A calculated run makes the observed pass"
-            "first, to choose the method and the mask cheaply, and keeps its"
-            "output as a checkpoint."
+    .help = "observed integrates only the spots found by spotfinding."
+            "calculated integrates everything the geometry predicts out to"
+            "calculated_d_min - two to three orders of magnitude more, most of"
+            "it weak, which is the point: where to cut is a merging decision."
+            "A calculated run makes the observed pass first, to choose the"
+            "method and mask cheaply, and keeps it as a checkpoint."
     .expert_level = 1
   calculated_d_min = None
     .type = float
@@ -279,14 +268,12 @@ integration {
     .expert_level = 1
   mask = ellipse seed_skewness *both
     .type = choice
-    .help = "Foreground/background mask method. both integrates twice, once"
-            "with each mask, and keeps the better of the two (see"
-            "mask_metric). The masks partition the shoebox differently, so"
-            "which one is better is data dependent: seed_skewness typically"
+    .help = "Foreground/background mask method. both integrates twice and"
+            "keeps the better by mask_metric. The masks partition the shoebox"
+            "differently, so which is better is data dependent: seed_skewness"
             "takes in more of the peak tails and gives higher I/sigma, at"
-            "several times the run time. The run is integrated in one call, so"
-            "the choice covers every exposure and all the batches are"
-            "integrated the same way."
+            "several times the run time. One call covers the run, so every"
+            "batch is integrated alike."
     .expert_level = 1
   mask_metric = *i_over_sigma n_integrated
     .type = choice

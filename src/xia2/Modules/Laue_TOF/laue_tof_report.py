@@ -56,10 +56,9 @@ def parse_lambdanorm(path: pathlib.Path) -> dict[str, list[list[float]]]:
     """
     The curve and the binned observations from a lawless LAMBDANORM file.
 
-    The file is a gnuplot script with the numbers in named inline data blocks,
-    $LAMBDANORM (wavelength, w, relative uncertainty, w low, w high) and
-    $LAMBDABINS (wavelength, w, sigma), so the blocks are read and the gnuplot
-    around them ignored.
+        A gnuplot script whose numbers sit in inline blocks: $LAMBDANORM
+        (wavelength, w, relative uncertainty, w low, w high) and $LAMBDABINS
+        (wavelength, w, sigma). The gnuplot around them is ignored.
     """
     blocks: dict[str, list[list[float]]] = {}
     current: str | None = None

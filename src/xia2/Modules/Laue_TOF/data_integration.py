@@ -91,11 +91,8 @@ class IntegrationChoices:
     """
     The method and mask one run was integrated with.
 
-    Every exposure of a run has to be integrated the same way for the batches
-    to be comparable when they are scaled together, which is now automatic:
-    they are integrated in one call. The choices are still carried in one place
-    because the two-axis decision - which profile method survived, and which
-    foreground mask won - is made once and reported once.
+    Decided once per run: the whole run is integrated in one call, so every
+    batch is treated alike.
     """
 
     method: str | None = None
@@ -107,10 +104,8 @@ class IntegrationPass:
     """
     What one call of dials.tof_integrate is asked to integrate.
 
-    A run makes either one pass over the reflections that were found, or that
-    pass followed by a second over everything the geometry predicts. The two
-    differ only in these three settings, so they travel together rather than
-    being read from the parameters at the point of use.
+    An observed pass, or that followed by a calculated one, differ only in
+    these three settings.
     """
 
     integration_type: str = "observed"
@@ -160,11 +155,9 @@ def wavelength_range(experiment) -> tuple[float, float]:
     """
     The wavelength range of an experiment, in Angstrom, from its TOF range.
 
-    Derived from the scan rather than taken from beam.get_wavelength_range(),
-    because a format class may state a fixed band instead of the one the data
-    holds: FormatESSNMX derives it (and the two agree to three decimals) while
-    FormatMANDI returns a hard-coded 2.0-4.0 where the histogram gives
-    1.92-4.08. Falls back to the beam if the scan has no time_of_flight.
+    From the scan, not beam.get_wavelength_range(): FormatMANDI states a
+    hard-coded 2.0-4.0 where its histogram gives 1.92-4.08. Falls back to the
+    beam if the scan has no time_of_flight.
     """
     scan = experiment.scan
     if scan is None or not scan.has_property("time_of_flight"):
@@ -180,14 +173,12 @@ def wavelength_range(experiment) -> tuple[float, float]:
 
 def geometric_d_min(experiment) -> tuple[float, float]:
     """
-    The best resolution the detector and the wavelength band can reach, and the
-    largest scattering angle, in Angstrom and degrees.
+    The geometric resolution limit and the largest scattering angle, in
+    Angstrom and degrees.
 
-    d = lambda / (2 sin theta), so the limit is the shortest wavelength at the
-    largest scattering angle any pixel sees. It is a property of the instrument
-    and the binning, not of the crystal or of what was observed, which makes it
-    the sensible place to stop when integrating every predicted reflection
-    rather than only the spots that were found.
+    d = lambda / (2 sin theta) at the shortest wavelength and largest angle any
+    pixel sees. A property of the instrument, so nothing can be recorded beyond
+    it.
     """
     lambda_min, _ = wavelength_range(experiment)
     to_source = experiment.beam.get_sample_to_source_distance() / 1000.0
@@ -223,10 +214,8 @@ def _format_class_name(image: str) -> str:
     """
     The dxtbx format class that will read a file, for error messages.
 
-    Which class claims a file matters here: a reduced MANDI file and a reduced
-    NMX file are both NXlauetof, and an instrument-specific class that claims
-    the wrong one of them fails deep inside dxtbx, where the traceback says
-    nothing about why.
+    Reduced MANDI and NMX files are both NXlauetof, and the wrong class
+    claiming one fails deep in dxtbx with a traceback that says nothing.
     """
     try:
         from dxtbx.format.Registry import get_format_class_for_file
@@ -241,18 +230,12 @@ def apply_detector_calibration(experiments: pathlib.Path, detcal: pathlib.Path) 
     """
     Replace the imported detector geometry with an ISAW/Mantid .DetCal one.
 
-    The nominal MANDI geometry places individual panels several pixels out.
-    Refinement does not correct that: with one detector group and many panels
-    it absorbs the error into the crystal orientation instead, which leaves
-    per-panel residuals that no mask or profile model can recover from.  On
-    13378 the calibration takes indexing from 222/329 reflections at a mean
-    residual of 3.28 px to 314/329 at 1.38 px, and agreement with Mantid's own
-    peak positions from 28.5 % to 74.4 % within 3 px.
+    The nominal MANDI geometry places panels several pixels out, which
+    refinement absorbs into the crystal orientation rather than correcting.
 
-    Conventions: DetCal Base -> fast axis, Up -> slow axis, Center is the panel
-    midpoint in cm, and DETNUM matches the dxtbx panel named "bank<DETNUM>".
-    Base and Up are written to five decimals, so slow is re-orthogonalised
-    against fast before use.
+    Conventions: Base -> fast axis, Up -> slow, Center is the panel midpoint in
+    cm, DETNUM matches the dxtbx panel "bank<DETNUM>". Base and Up carry five
+    decimals, so slow is re-orthogonalised against fast.
     """
     import numpy as np
 
@@ -310,12 +293,10 @@ def run_import(
     file_input: FileInput,
 ) -> pathlib.Path:
     """
-    Run dials.import on every exposure of the run at once, and check that the
-    data really is TOF.
+    Import every exposure of the run at once, and check the data is TOF.
 
-    All the exposures go into one experiment list, which is what lets the
-    following steps see the run as a whole. Each becomes its own experiment and
-    its own imageset, because they are separate stationary measurements.
+    One experiment and imageset per exposure, in one experiment list, which is
+    what lets the following steps see the run as a whole.
     """
     experiments = working_directory / "imported.expt"
     command = [
@@ -377,13 +358,9 @@ def _check_uniform(experiments, inputs: list[tuple[str, str]]) -> None:
     """
     Require every exposure to share a detector shape and a TOF binning.
 
-    dials.tof_integrate reads the panel size and the number of TOF bins from
-    the first experiment and applies them to all of them
-    (`image_size = experiments[0].detector[0].get_image_size()`), so a run whose
-    exposures were reduced to different bin counts is integrated against the
-    wrong frame axis rather than rejected. Two reductions of the same NMX run,
-    one at 50 bins and one at 100, import together without complaint, which is
-    how this was found.
+    dials.tof_integrate reads image_size and tof_size from experiments[0] and
+    applies them to all, so a mixed-binning run is integrated against the wrong
+    frame axis rather than rejected.
     """
     shapes: dict[tuple[int, int], list[str]] = {}
     for expt, (_, path) in zip(experiments, inputs):
@@ -407,18 +384,11 @@ def _report_size_filter(
     logfile: pathlib.Path, params: SpotfindingParams, n_strong: int
 ) -> None:
     """
-    Say how much of the spot list the minimum spot size took.
+    Say how much of the spot list min_spot_size took, from the find_spots log.
 
-    min_spot_size is the parameter most worth revisiting on a new instrument:
-    the default suits NMX, where small split peaks are the problem, but on data
-    whose spots span few TOF frames it can discard most of what was found. The
-    counts are in the dials.find_spots log, which reports what it extracted
-    before filtering.
-
-    Advice is only worth giving when the spots that survive are few: a
-    thresholding pass turns up tens of thousands of one and two pixel
-    candidates, so on NMX 99% of them are filtered out and 2296 spots remain,
-    which is not a problem. On MANDI it is 59% of 558, leaving 227.
+    The default suits NMX but is too big for data whose spots span few TOF
+    frames. Only worth advising when few spots survive: discarding 99% of a
+    thresholding pass is the filter working, not a loss.
     """
     if not logfile.is_file():
         return
@@ -436,10 +406,8 @@ def _report_size_filter(
         f" spotfinding.min_spot_size ({params.min_spot_size} pixels)"
     )
     if fraction >= 0.5 and params.min_spot_size > 3 and n_strong < FEW_SPOTS:
-        # Nothing to suggest once the size filter is down to a few pixels: a
-        # threshold algorithm like radial_profile finds tens of thousands of
-        # one and two pixel candidates by design, and dropping those is the
-        # filter working rather than a loss.
+        # Below a few pixels there is nothing to suggest: discarding the
+        # thousands of 1-2 px candidates is the filter working, not a loss.
         xia2_logger.warning(
             f"{message}. That is most of them: try a smaller"
             " spotfinding.min_spot_size, and"
@@ -454,20 +422,12 @@ def find_spots(
     working_directory: pathlib.Path, params: SpotfindingParams, n_exposures: int = 1
 ) -> list[int]:
     """
-    Run dials.find_spots over the whole run, returning the spots per exposure.
+    Find spots over the whole run, returning the count per exposure.
 
-    One call covers every exposure, and the strong spots come back in a single
-    table whose `id` column says which exposure each spot belongs to.
-
-    There is deliberately no resolution cut here. `spotfinder.filter.d_min` and
-    `d_max` cannot work on TOF data: both route through
-    `dials/util/masking.py::_apply_resolution_mask`, which builds a
-    `ResolutionMaskGenerator` from the beam, and a `PolychromaticBeam` has no
-    fixed `s0` to build it from - `dials.find_spots` dies with
-    `PolychromaticBeam has no fixed s0` at `beam.h(741)`. A pixel mask is the
-    wrong mechanism anyway, since on a Laue-TOF image the resolution of a pixel
-    depends on the wavelength of the neutron that arrived there. A cut would
-    have to be made in reflection space, after the wavelength is known.
+    One call; the table's `id` column says which exposure each spot came from.
+    No resolution cut here - a DIALS one is a pixel mask needing a fixed s0
+    that a PolychromaticBeam lacks. d_min/d_max cut the integrated reflections
+    instead, in combine.
     """
     command = [
         _executable("dials.find_spots"),
@@ -501,11 +461,8 @@ def find_spots(
         xia2_logger.info(f"Found {total} strong spots")
     _report_size_filter(working_directory / "dials.find_spots.log", params, total)
 
-    # The limit is per exposure, not over the run. What it guards against is an
-    # assertion in the DIALS TOF reflection predictor, and refinement treats
-    # each exposure as its own job - dials.refine says "independently-refined
-    # groups of experiments have been recombined" - so one exposure's spot list
-    # is what reaches the predictor, however many exposures there are.
+    # Per exposure, not over the run: dials.refine treats each exposure as its
+    # own job, so one spot list is what reaches the predictor it guards.
     over = [i for i, n in enumerate(counts) if n > params.max_strong]
     if over:
         worst = max(over, key=lambda i: counts[i])
@@ -522,17 +479,14 @@ def find_spots(
 
 def _primitive_setting_a_matrix(crystal: Crystal) -> tuple[float, ...]:
     """
-    The A matrix of a crystal, in the primitive setting. Needed currently
-    due to a DIALS bug.
+    The A matrix of a crystal in the primitive setting, working around a
+    DIALS bug.
 
-    dials.index expects known_symmetry.A_matrix in the primitive setting and
-    contains the conversion, but IndexerKnownOrientation assigns it to the loop
-    variable and discards it (DIALS 3.30), while the post-indexing conversion
-    back to the centred setting still runs - so a centred cell comes back wrong.
-    Converting here supplies the setting the indexer needs, leaving the skipped
-    conversion nothing to do. Note this is tied to the defect: the crystal is
-    built with known_symmetry.space_group, so a fixed DIALS would convert this
-    matrix a second time. _assess_indexing's cell check is what would catch it.
+    IndexerKnownOrientation discards its own conversion to the primitive
+    setting while the conversion back still runs, so a centred cell comes back
+    wrong. Converting here leaves the skipped one nothing to do - which means a
+    fixed DIALS would convert twice, and _assess_indexing's cell check is what
+    would catch that.
     """
     cb_op = crystal.get_space_group().info().change_of_basis_op_to_primitive_setting()
     return crystal.change_basis(cb_op).get_A()
@@ -548,26 +502,17 @@ def _assess_indexing(
     """
     Decide whether one exposure's indexing solution is good enough to keep.
 
-    Indexing that 'worked' is not enough: a small, clean spot list indexes
-    almost completely, and an alternative indexing can index plenty of
-    reflections on the wrong cell. So check the cell, the number indexed and
-    the positional residuals.
-
-    Takes the crystal and the exposure's own indexed reflections rather than a
-    pair of file names, because one dials.index call now covers the whole run
-    and each exposure has to be judged on its own rows.
+    "It indexed" is not enough: a small clean spot list indexes almost
+    completely, and an alternative indexing can index plenty on the wrong cell.
+    So check the cell, the count and the residuals.
     """
     result = IndexingResult(method=method, n_strong=n_strong)
     result.n_indexed = indexed.size()
 
     if "xyzcal.px" in indexed and indexed.size():
-        # The median residual, not the mean: a solution that is right about most
-        # of the spot list can carry a tail of badly fitted reflections that the
-        # mean is dominated by, and rejecting it loses a whole orientation. On
-        # MANDI 13380 the mean says 9.38 px and the median 1.92 px, where
-        # dials.index, which reports its RMSD after refinement has discarded
-        # outliers, says 1.45 / 1.12 px. Comparable with the dials.index log to
-        # within the difference between a median and an outlier-rejected mean.
+        # Median, not mean: a mostly-right solution can carry a tail of badly
+        # fitted reflections that the mean is dominated by. Comparable with the
+        # dials.index log, which reports after outlier rejection.
         dx, dy, _ = (indexed["xyzobs.px.value"] - indexed["xyzcal.px"]).parts()
         squared = flex.pow2(dx) + flex.pow2(dy)
         result.rmsd_px = float(sorted(squared)[squared.size() // 2] ** 0.5)
@@ -617,11 +562,8 @@ def _write_indexing_subset(
     """
     Write the imported experiments and strong spots of a subset of exposures.
 
-    A rung of the ladder only has to re-index the exposures the earlier rungs
-    did not solve, so each rung gets its own pair of input files holding just
-    those. Experiment ids are renumbered from zero, which is what dials.index
-    expects, and the mapping back to the original exposure is the position in
-    `exposures`.
+    Ids are renumbered from zero, as dials.index expects; the mapping back to
+    the original exposure is the position in `exposures`.
     """
     expts = load.experiment_list(
         working_directory / "imported.expt", check_format=False
@@ -660,12 +602,9 @@ def _indexing_base_command(params: IndexingParams) -> list[str]:
     if params.d_min_start:
         command.append(f"indexing.refinement_protocol.d_min_start={params.d_min_start}")
     command += [
-        # The exposures of a run are separate stationary measurements of one
-        # crystal, each at its own setting, so there is no single orientation to
-        # fit and they must be indexed independently. DIALS cannot infer this:
-        # a TOF experiment carries a goniometer and a scan over its bins, so
-        # is_still() is False and joint_indexing=Auto takes the all-rotation
-        # branch, which refuses to choose and aborts the run.
+        # Separate stationary measurements, so each is indexed on its own.
+        # DIALS cannot infer this: a TOF experiment has a goniometer and a scan
+        # over its bins, so is_still() is False and Auto aborts the run.
         "indexing.joint_indexing=False",
         f"refinement.reflections.outlier.algorithm={params.outlier_algorithm}",
         f"refinement.reflections.outlier.tukey.iqr_multiplier={params.outlier_iqr_multiplier}",
@@ -685,15 +624,10 @@ def _assess_rung(
     """
     Judge what one dials.index call returned, per exposure.
 
-    The output holds only the exposures that produced a crystal, in the order
-    their worker processes finished - dials.index extends the list inside an
-    `as_completed` loop - so the position of an experiment says nothing about
-    which exposure it came from. Its reflections' `imageset_id` does: DIALS
-    resets that to the index within this call, which maps back through
-    `exposures`.
-
-    Returns the assessment per exposure, and where each exposure's experiment
-    sits in this rung's output, which is what lifts it back out later.
+    Experiment order is completion order and failures are dropped, so position
+    says nothing about which exposure an experiment came from; `imageset_id`
+    does, DIALS having reset it to the index within this call. Returns the
+    assessments and each exposure's position in this rung's output.
     """
     experiments_file = working_directory / f"indexed_{tag}.expt"
     reflections_file = working_directory / f"indexed_{tag}.refl"
@@ -704,9 +638,8 @@ def _assess_rung(
 
     expts = load.experiment_list(experiments_file, check_format=False)
     refl = flex.reflection_table.from_file(reflections_file)
-    # A rung that solved nothing still writes its files, and the reflection
-    # table is then not merely empty but column-less, so asking it for a flag
-    # raises rather than returning nothing.
+    # A rung that solved nothing writes a column-less table, so asking it for
+    # a flag raises rather than returning nothing.
     if not refl.size() or "flags" not in refl:
         return results, positions
 
@@ -737,14 +670,9 @@ def _merge_indexed(
     """
     Gather the accepted solutions into one indexed.expt / indexed.refl.
 
-    The ladder leaves each rung's output on disk, so an accepted exposure has
-    to be lifted out of whichever rung solved it. Exposures are written in
-    input order, so the batches that reach the MTZ follow the order the
-    exposures were given in rather than the order they happened to index in.
-
-    Only the indexed reflections are carried over. The unindexed ones share a
-    single id of -1, which says nothing about which exposure they came from
-    once several exposures are in one table, and nothing downstream reads them.
+    Written in input order, so batches follow the order the exposures were
+    given in. Only indexed reflections: the unindexed share an id of -1, which
+    cannot be traced to an exposure, and nothing downstream reads them.
     """
     experiments = ExperimentList()
     tables = []
@@ -776,16 +704,10 @@ def index(
     """
     Index every exposure of the run, walking the method ladder over the set.
 
-    One dials.index call covers all the exposures still wanting a solution, with
-    joint_indexing=False so that each is indexed on its own. Near the limit of
-    what a detector layout can support indexing succeeds stochastically rather
-    than reproducibly, so a rung that leaves some exposures unsolved is followed
-    by the next method on just those, and finally by a seeded attempt using the
-    crystal of an exposure that did solve - which is what rescues layouts that
-    never index de novo.
-
-    Returns the attempts made for each exposure, the last of which is its
-    accepted solution if it has one.
+    One call per rung covers everything still unsolved, each exposure indexed
+    on its own. Near a layout's limit success is stochastic, so the next method
+    is tried on the leftovers, then a seeded attempt from a solved sibling.
+    Returns the attempts per exposure, the accepted one last.
     """
     attempts: list[list[IndexingResult]] = [[] for _ in n_strong]
     pending = []
@@ -807,10 +729,8 @@ def index(
     base_command = _indexing_base_command(params)
     xia2_logger.notice(banner("Indexing"))  # type: ignore
 
-    # Where every accepted solution lives, keyed by exposure and method: the
-    # rung's tag and the position of that exposure's experiment in the rung's
-    # output. Keyed by method as well as exposure because an exposure can be
-    # solved more than once, and the best of those is chosen at the end.
+    # Where each accepted solution lives: (exposure, method) -> (rung tag,
+    # position). Keyed by method too, since an exposure can be solved twice.
     locations: dict[tuple[int, str], tuple[str, int]] = {}
     # The best accepted result per exposure so far, to pick a seed crystal from.
     accepted: dict[int, IndexingResult] = {}
@@ -892,16 +812,14 @@ def index(
             if good_enough:
                 # Good enough that a later rung would only cost time.
                 pending.remove(exposure)
-            # An exposure whose solution was merely acceptable stays pending, so
-            # that a later rung can try to better it. Its accepted result is
-            # kept either way, and the best of them wins below.
+            # A merely acceptable solution stays pending so a later rung can
+            # better it; the best of them wins below.
 
     if not accepted:
         return attempts
 
-    # A later rung is walked because an earlier one was merely acceptable, not
-    # because it is bound to be better, so each exposure keeps its best attempt
-    # by RMSD rather than its last.
+    # A later rung is not bound to be better, so keep the best by RMSD rather
+    # than the last.
     chosen: dict[int, tuple[str, int]] = {}
     for exposure in sorted(accepted):
         solutions = [a for a in attempts[exposure] if a.accepted]
@@ -919,15 +837,10 @@ def index(
     return attempts
 
 
-# How dials.refine parameterises the detector, always. Hierarchical rather
-# than automatic so that the panels are free to move relative to one another,
-# which is what a multi-panel TOF instrument needs: with one rigid detector,
-# refinement absorbs a per-panel error into the crystal orientation instead of
-# correcting it, and leaves residuals no mask or profile model can recover
-# from. The level matters as much as the choice - on a flat hierarchy, which is
-# what the three NMX panels hang off, level 0 *is* the whole detector as one
-# body and refines exactly what automatic does (16 parameters, identical
-# residuals); level 1 reaches the panels themselves (28 parameters).
+# Hierarchical so the panels move relative to one another; a rigid detector
+# absorbs per-panel error into the crystal orientation instead. The level
+# matters as much: on NMX's flat hierarchy level 0 is the whole detector and
+# refines what automatic does, level 1 reaches the panels.
 DETECTOR_PANELS = "hierarchical"
 DETECTOR_HIERARCHY_LEVEL = 1
 
@@ -995,11 +908,9 @@ def _tof_integrate_command(
 
 def _integration_quality(reflections: pathlib.Path) -> tuple[int, float]:
     """
-    How well an integration run went: how many reflections were integrated by
-    summation, and their mean I/sigma.
+    Reflections integrated by summation and their mean I/sigma.
 
-    Summation is used for the comparison whatever the method, because it is the
-    one set of intensities that every run produces.
+    Summation whatever the method, being the one set every run produces.
     """
     table = flex.reflection_table.from_file(reflections)
     table = table.select(table.get_flags(table.flags.integrated_sum))
@@ -1017,11 +928,10 @@ def _integration_quality(reflections: pathlib.Path) -> tuple[int, float]:
 
 def _profile_fraction(reflections: pathlib.Path) -> float:
     """
-    The fraction of integrated reflections that a profile fit succeeded for.
+    The fraction of integrated reflections a profile fit succeeded for.
 
-    A profile run can finish cleanly having fitted almost nothing, leaving an
-    intensity.prf column that covers a handful of reflections, so success of
-    the program is not success of the method.
+    A profile run can finish cleanly having fitted almost nothing, so success
+    of the program is not success of the method.
     """
     table = flex.reflection_table.from_file(reflections)
     if "intensity.prf.value" not in table:
@@ -1045,9 +955,8 @@ def _run_tof_integrate(
     Integrate with one mask, falling back to summation if a profile method
     fails outright.
 
-    Profile fitting is not a per-reflection risk only: a single shoebox that
-    the fit cannot bound aborts dials.tof_integrate, so the whole run is lost.
-    Returns the method that actually produced the output.
+    One shoebox the fit cannot bound aborts the whole program, not one
+    reflection. Returns the method that produced the output.
     """
     tag = f"{method}_{mask}"
     if pass_.integration_type == "calculated":
@@ -1087,10 +996,8 @@ def _run_tof_integrate(
     if method != "summation":
         fraction = _profile_fraction(integrated)
         if fraction < params.min_profile_fraction:
-            # Nothing to rerun: the summation intensities in this file are good
-            # and the profile ones are kept as they are, so that both reach the
-            # unmerged MTZ. What changes is which of them is exported as the
-            # single SHELX intensity.
+            # Nothing to rerun: both columns still reach the MTZ. What changes
+            # is which one SHELX exports.
             xia2_logger.warning(
                 f"{method} fitted only {fraction:.1%} of the reflections, fewer"
                 f" than integration.min_profile_fraction"
@@ -1104,13 +1011,11 @@ def _run_tof_integrate(
 
 def _record_lorentz(reflections: pathlib.Path, applied: bool) -> None:
     """
-    Record whether the Lorentz correction was applied, per reflection.
+    Stamp whether the Lorentz correction was applied.
 
-    dials.tof_integrate applies the correction to the intensities themselves
-    and leaves no trace of it in the output beyond a line in its log, so the
-    file cannot be asked later whether it has been corrected. The Lorentz
-    factor must be applied exactly once, and the scaling programs downstream
-    have their own keyword for it, so carry the answer with the data.
+    dials.tof_integrate writes no column or flag for it, only a log line, so
+    the answer has to travel with the data - it must be applied exactly once,
+    and the scaling programs have their own keyword for it.
     """
     table = flex.reflection_table.from_file(reflections)
     table["lorentz_applied"] = flex.bool(table.size(), applied)
@@ -1121,11 +1026,9 @@ def _predicted_count(experiments, d_min: float) -> int:
     """
     How many reflections the geometry predicts out to d_min.
 
-    Prediction is cheap next to integration - seconds against the hours that a
-    hundred thousand shoeboxes would take - so the count is worth having before
-    committing to a pass. It is an upper bound on what will be integrated,
-    since dials.tof_integrate then drops overlapping reflections and any that
-    fall outside the wavelength or time-of-flight range.
+    Seconds, against hours to integrate them, so worth knowing before
+    committing. An upper bound: overlapping and out-of-range ones are dropped
+    later.
     """
     from dials.algorithms.spot_prediction import TOFReflectionPredictor
 
@@ -1140,12 +1043,9 @@ def _d_min_for_count(experiments, target: int, d_min: float, predicted: int) -> 
     """
     The resolution at which the geometry predicts about target reflections.
 
-    Found by prediction rather than from the d^-3 that the number of
-    reflections in a sphere follows, because a Laue-TOF experiment does not
-    record a sphere: the wavelength band and the detector coverage both cut
-    into it, so the analytic estimate comes out optimistic and a user who
-    followed it would be refused a second time. It is only ever computed to
-    put a number in that refusal, and prediction is a second or two.
+    By prediction, not from d^-3: a Laue-TOF experiment does not record a
+    sphere, so the analytic estimate is optimistic and a user following it
+    would be refused twice. Only ever computed to put a number in that refusal.
     """
     low, high = d_min, d_min * (predicted / target) ** (1 / 3)
     for _ in range(8):
@@ -1173,14 +1073,11 @@ def _integrate_calculated(
     observed: pathlib.Path,
 ) -> tuple[str, pathlib.Path]:
     """
-    Integrate every reflection the geometry predicts, not only those observed.
+    Integrate every predicted reflection, not only those observed.
 
-    This is the second pass of a calculated run. The first has already fixed
-    the method and the mask on the spots that were found, which is cheap; this
-    one measures everything that can have been recorded, most of it weak. That
-    is the point: where to cut is a merging decision, taken on CC-half after
-    scaling, and re-merging costs nothing where re-integrating costs
-    everything.
+    The second pass of a calculated run; the first fixed the method and mask
+    cheaply. Most of what this adds is weak, which is the point: where to cut
+    is a merging decision, and re-merging is free where re-integrating is not.
     """
     expts = load.experiment_list(working_directory / experiments, check_format=False)
     limit, _ = geometric_d_min(expts[0])
@@ -1201,10 +1098,8 @@ def _integrate_calculated(
             f" {d_min:.3f} A"
         )
 
-    # The band the data actually cover. Predictions outside it cannot have been
-    # recorded, and integrating them adds noise with a Miller index on it. Only
-    # the calculated pass needs this: an observed reflection is inside the band
-    # by construction, having been found in the data.
+    # Predictions outside the recorded band add noise with a Miller index on
+    # it. Only the calculated pass needs this; an observed spot was found.
     band = params.wavelength_range or wavelength_range(expts[0])
 
     n_predicted = _predicted_count(expts, d_min)
@@ -1250,12 +1145,11 @@ def integrate(
     reflections: str = "refined.refl",
 ) -> pathlib.Path:
     """
-    Run dials.tof_integrate, returning the integrated reflection file.
+    Run dials.tof_integrate over the run, returning the integrated reflections.
 
-    With mask=both the data are integrated with each foreground mask and the
-    better of the two is kept; that choice, and any fallback from a failed
-    profile method, are recorded in choices and reused for the remaining
-    orientations, so that every batch is integrated the same way.
+    With mask=both the data are integrated each way and the better kept by
+    mask_metric. One call covers every exposure, so all the batches are
+    integrated alike.
     """
     choices = choices if choices is not None else IntegrationChoices()
     method = choices.method or params.method
@@ -1300,13 +1194,9 @@ def integrate(
 
     chosen = integrated_files[mask]
     if params.integration_type == "calculated":
-        # The first pass is always over the observed spots: it is what chooses
-        # the method and the mask, at a hundredth of the cost of doing that
-        # comparison on every predicted reflection. Its output is left on disk
-        # as a checkpoint, being a strict subset of what follows.
-        # A profile method that survived the observed pass can still fail here,
-        # where most of the shoeboxes hold no peak, so the method that came out
-        # of this pass is the one the remaining orientations use.
+        # The observed pass chooses the method and mask at a hundredth of the
+        # cost, and stays on disk as a checkpoint. A profile method that
+        # survived it can still fail here, where most shoeboxes hold no peak.
         method, chosen = _integrate_calculated(
             working_directory, params, method, mask, experiments, reflections, chosen
         )
@@ -1333,12 +1223,9 @@ def _apply_resolution_limits(
     """
     Keep only the reflections inside the requested resolution range.
 
-    The cut is made here, on reflections that know their own d spacing, because
-    it cannot be made at spotfinding: DIALS applies a resolution cut as a pixel
-    mask, which needs a fixed s0 that a `PolychromaticBeam` has not got, and on
-    a Laue-TOF image the resolution a pixel corresponds to depends on the
-    wavelength of the neutron that arrived there. Cutting after integration also
-    costs nothing to change, where re-integrating costs everything.
+    Here, on reflections that know their own d, because a spotfinding cut would
+    be a pixel mask and a Laue-TOF pixel has no one resolution. Cutting after
+    integration is also free to change.
     """
     if d_min is None and d_max is None:
         return table
@@ -1368,13 +1255,11 @@ def combine(
     params: ExportParams,
 ) -> tuple[pathlib.Path, pathlib.Path]:
     """
-    Split the run's integrated output per exposure and write it ready to export.
+    Split the run's integrated output per exposure, ready to export.
 
-    The exposures were integrated together, so this no longer concatenates
-    files; it gives each exposure its own experiment identifier and its own
-    batch, so that the exported intensities can be scaled per setting
-    downstream. Any d_min/d_max is applied here, so that everything downstream -
-    the SHELX export, the unmerged MTZ and the scaling - sees the same cut.
+    Each exposure gets its own identifier and batch, so it can be scaled per
+    setting. d_min/d_max is applied here, so the export, the MTZ and the
+    scaling all see the same cut.
     """
     indexed = [result for result in results if result.indexed]
     if not indexed:
@@ -1396,9 +1281,8 @@ def combine(
     experiments, tables = assign_unique_identifiers(experiments, tables)
     _match_intensity_columns(tables, origins)
 
-    # dials.export numbers the Laue batches by imageset_id. Renumber it to the
-    # position of the experiment in the list, so that each exposure exports as
-    # its own batch rather than every one of them as batch 0.
+    # dials.export numbers Laue batches by imageset_id, so renumber it to the
+    # experiment's position or every exposure exports as batch 0.
     for i, (table, origin) in enumerate(zip(tables, origins)):
         table["imageset_id"] = flex.int(table.size(), i)
         xia2_logger.info(f"Batch {i}: {origin}, {table.size()} reflections")
@@ -1426,9 +1310,8 @@ def _intensity_choice(reflections: pathlib.Path, params: ExportParams) -> str:
     """
     Which intensities to export.
 
-    dials.export refuses its own auto choice for SHELX when both summation and
-    profile-fitted intensities are present, which is exactly what a successful
-    profile run produces, so the choice is always made here.
+    dials.export refuses its own auto choice for SHELX when both columns are
+    present, which is what a successful profile run produces.
     """
     if params.intensity != "auto":
         return params.intensity
@@ -1449,10 +1332,8 @@ def _match_intensity_columns(
     """
     Make every table carry the same intensity columns, so they can be combined.
 
-    A profile method that aborted on one orientation and worked on another
-    leaves tables that cannot be concatenated, and an MTZ cannot hold a column
-    for only some of its observations. The profile-fitted intensities are the
-    ones that go, since summation is always there.
+    An MTZ cannot hold a column covering only some observations, so the
+    profile-fitted ones go; summation is always there.
     """
     with_profile = [
         origin
@@ -1482,12 +1363,8 @@ def _lorentz_applied(reflections_file: pathlib.Path) -> bool:
     """
     Whether the data already carries the Lorentz correction.
 
-    This pipeline always applies it at integration, so the answer is yes for
-    anything it produced; the check exists for files it did not, which it can
-    be pointed at by rerunning in an old directory. Without the column the
-    answer is no, which is what dials.tof_integrate defaults to and so what
-    data integrated elsewhere most likely carries. The combine step has already
-    warned about the missing provenance.
+    Always yes for data this pipeline produced; the check is for data it did
+    not. No column means no correction, which is dials.tof_integrate's default.
     """
     table = flex.reflection_table.from_file(reflections_file)
     if "lorentz_applied" not in table:
@@ -1499,9 +1376,8 @@ def _report_lorentz(table: flex.reflection_table) -> None:
     """
     Say whether the combined data carry the Lorentz correction.
 
-    The correction has to be applied exactly once, here or by the scaling
-    program, so the answer decides what is passed downstream. Orientations that
-    disagree cannot be scaled together.
+    It must be applied exactly once, so this decides what is passed downstream.
+    Exposures that disagree cannot be scaled together.
     """
     if "lorentz_applied" not in table:
         xia2_logger.warning(
@@ -1614,11 +1490,9 @@ def run_data_integration(
     """
     Process one run: every exposure of it, through the DIALS steps together.
 
-    The exposures are stationary measurements of one crystal at different
-    settings, so they belong to one run and are handed to each DIALS program as
-    a single multi-experiment set. Indexing is the step that has to know they
-    are separate measurements rather than one sweep, which is what
-    joint_indexing=False tells it.
+    Stationary measurements of one crystal, handed to each program as one
+    multi-experiment set. Indexing is the step that has to know they are
+    separate measurements rather than one sweep.
     """
     inputs = [("image", image) for image in setup.file_input.images]
     inputs += [("template", t) for t in setup.file_input.templates]

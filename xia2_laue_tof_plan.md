@@ -1,869 +1,340 @@
-# xia2.laue_tof — neutron Laue time-of-flight processing pipeline
+# xia2.laue_tof — neutron Laue time-of-flight pipeline
 
 ## Status (2026-10-09)
 
-The pipeline runs end to end — import → find_spots → index → refine →
-tof_integrate → combine → export → unmerged MTZ → pointless → lawless → report.
-What is left is tuning, tests and docs, not structure.
-
-**Written and working** (all lint/format/mypy clean, verified on real data):
+Runs end to end: import → find_spots → index → refine → tof_integrate → combine
+→ export → unmerged MTZ → pointless → lawless → report. What is left is tuning,
+tests and docs, not structure.
 
 | file | what it is |
 |---|---|
-| `src/xia2/Modules/Laue_TOF/laue_tof.py` | the `*Params` dataclasses with `from_phil`, `classify_input`, `setup_from_phil`, `run_xia2_laue_tof` |
-| `src/xia2/Modules/Laue_TOF/laue_tof_phil.py` | the phil scope, split out of `laue_tof.py`: top level, `spotfinding{}`, `indexing{}`, `integration{}`, `output{}`, `scaling{}` |
-| `src/xia2/Modules/Laue_TOF/data_integration.py` | the step functions: `run_import`, `find_spots`, `index`, `refine`, `integrate`, `combine`, `export_shelx`, `unmerged_mtz`, `process_exposure`, `run_data_integration` |
-| `src/xia2/Modules/Laue_TOF/laue_tof_mtz.py` | the unmerged Laue MTZ writer and `validate_unmerged_mtz` / `check_wavelength_column` |
-| `src/xia2/Modules/Laue_TOF/laue_tof_scale.py` | the pointless and lawless steps, version detection, the lawless XML reader |
-| `src/xia2/Modules/Laue_TOF/laue_tof_report.py` | the `report` step, in xia2's own report format |
-| `src/xia2/Modules/Laue_TOF/util.py` | `report_timing` (copied, not imported from SSX — nothing here may depend on `xia2.Modules.SSX`) |
-| `src/xia2/cli/laue_tof.py` | the `xia2.laue_tof` command: `ArgumentParser` / `setup_logging` / `cleanup` / `write_citations`, mirroring `cli/ssx.py`. Registered in `setup.py` as `xia2.laue_tof=xia2.cli.laue_tof:run` |
+| `Modules/Laue_TOF/laue_tof.py` | `*Params` dataclasses, `setup_from_phil`, `run_xia2_laue_tof` |
+| `Modules/Laue_TOF/laue_tof_phil.py` | the phil scope |
+| `Modules/Laue_TOF/data_integration.py` | the step functions and `run_data_integration` |
+| `Modules/Laue_TOF/laue_tof_mtz.py` | unmerged Laue MTZ writer + `validate_unmerged_mtz` |
+| `Modules/Laue_TOF/laue_tof_scale.py` | pointless and lawless steps |
+| `Modules/Laue_TOF/laue_tof_report.py` | the report step |
+| `Modules/Laue_TOF/util.py` | `report_timing` (copied, never imported from SSX) |
+| `cli/laue_tof.py` | the command, registered in `setup.py` |
 
-Verified end to end **from the shell** on
-`ppase_allconfigs/config1/config1_scipp_output_50bins.h5`: 2296 strong spots →
-`fft3d` 1927/2296 indexed (83.9 %), RMSD 1.52 px → refined cell
-`(105.9, 95.69, 113.94, 90, 98.06, 90) C 1 2 1` → 1359 integrated reflections
-carrying `wavelength_cal` over 2.23–3.54 Å, with `Adding Lorentz correction` in
-the integration log; 35 s for the run. Seeded indexing gives `1925/2296 (83.8 %)`
-and returns the correct centred cell.
+### Done
 
-Also verified at **N=2** (the same file linked under two names, so two
-orientations of identical data): orientation_1 indexes de novo, orientation_2 is
-seeded (`known_orientation`), and the combine/export step writes
-`scale/combined.{expt,refl}` with 2 experiments, 2 imagesets, unique identifiers
-and 2703 reflections, then `scale/dials.hkl` with **one SHELX batch per
-orientation** (1359 + 1344 reflections in batches 0 and 1).
+| commit | date | what |
+|---|---|---|
+| `efd855e9` | 10-09 | `d_min`/`d_max` redefined as a cut on integrated reflections |
+| `48e54cc5` | 10-08 | whole run processed together; `joint_indexing=False`; refine at `hierarchical`/level 1 |
+| `816b6d56` | 10-08 | `max_cell` always fixed; `max_cell_fallback` = 150 Å |
+| `000554d0` | 09-26 | ISAW `.DetCal` calibration at import |
+| `d62b2300` | 09-24 | integrate to the geometric limit; Lorentz hard-coded on |
+| `94ad4a4b` `863a78db` `1e7cce04` | 09-21 | scaling tail, unmerged MTZ, report |
 
-**Lorentz is always applied at integration** — settled in `d62b2300`
-(2026-09-24), which hard-codes `corrections.lorentz=True` and removes the phil
-option. This **reverses `589b452f`** (2026-09-22, *"Leave the Lorentz correction
-to lawless"*), so read that commit as a snapshot, not as the design: the
-`lawless` branch in use has no `LORENTZ` keyword and aborts if given one, and the
-`sin^2(theta)` half of the factor is not something the normalisation can absorb.
-The `profile_1d_ibix` defect that made this painful is **fixed upstream by
-[#3281](https://github.com/dials/dials/pull/3281)**: it bounds `A` by the phil
-`profile_1d_ibix.min_A`/`max_A` rather than by `1e4 * intensity_max`, and
-corrects the inverted FWHM guard, which lifts the fit fraction on config3 from
-11 % to 62 %. **That fix is in `dials-dev`, not in the `dials-v3-30-0`
-checkout** — see *Environment* below, where getting this wrong cost a session.
-See [Lorentz: exactly once](#lorentz-exactly-once).
+### Next, in order
 
-**Binning removed (2026-09-23):** the `bin` step, the `binning` phil scope,
-`BinningParams`, `bin_run`, `histogram_mandi_run` and the file-classification
-machinery are gone. The pipeline now checks only that dxtbx can read each input -
-`readable_images()` asks the format class for an image count, which `understand()`
-cannot answer - and stops with an error naming any file it cannot. Raw event data
-has to be reduced before it is handed over. MANDI's in-place histogramming is what
-prompted this: binning and reading were two questions answered by one tangled
-check, and the MANDI route mutates the user's raw files. **To be re-added**, as a
-separate step that does not classify input on the pipeline's behalf; the old code
-is in the history at [Step 0](#step-0-new-tof-binning-with-essnmx).
+1. **Rank indexing solutions on more than RMSD.** `data_integration.py` keeps the
+   best accepted attempt by median RMSD; the study calls for the geometric mean of
+   indexed count, fraction and RMSD. The 50-bin rubredoxin case is why: `fft1d`
+   finds 1.57 px on ~1300 of 9102 spots and `min_indexed_fraction` (0.25) rejects
+   it, the denominator being mostly junk. Probably means judging the fraction over
+   a resolution range the data support.
+2. **Extend the ladder past `indexing.method`** to the threshold algorithm and
+   `min_spot_size`. A `min_spot_size` rung needs `dials.find_spots` re-run, which
+   the ladder does not currently do.
+3. **Warn when a cell is up against `max_cell`.** Fixing the default moved the
+   failure rather than removing it: a cell longer than the fallback still
+   truncates silently.
+4. **Tests, then docs.** 3 tests, all gated on a MANDI file that may be absent; no
+   SXD case, no converter unit test, no `doc/sphinx` page. The multi-exposure
+   `imageset_id` bookkeeping is tested only by hand.
+5. **Re-add TOF binning** as a step that does not classify input on the pipeline's
+   behalf.
 
-**Done, most recent first:**
+### Testing convention
 
-| commit | date | what | written up in |
-|---|---|---|---|
-| `48e54cc5` | 10-08 | every exposure of a run processed together, `joint_indexing=False`, `dials.refine` at `panels=hierarchical hierarchy_level=1` | § *One run, processed together* |
-| `816b6d56` | 10-08 | `indexing.max_cell` always fixed; new `max_cell_fallback` = 150 Å | § *Indexing defaults*, and the rubredoxin block |
-| `18c69944` | 10-08 | this Status section brought back in line with the code | — |
-| `bef929bd` | 10-08 | expert levels in the phil help | — |
-| `000554d0` | 09-26 | ISAW `.DetCal` detector calibration applied at import | `apply_detector_calibration` |
-| `d62b2300` | 09-24 | integrate to the geometric limit; stop guessing about input; Lorentz hard-coded back on | § *Resolution: observed, then calculated* |
-| `589b452f` | 09-22 | Lorentz to lawless — **reversed by `d62b2300`**, see above | — |
-| `94ad4a4b` `863a78db` `1e7cce04` | 09-21 | scaling tail, unmerged MTZ, xia2-format report | below in this section |
-
-**Next, in order:**
-
-1. **Rank indexing solutions on more than RMSD.** `data_integration.py:902`
-   keeps the best accepted attempt by median RMSD alone; § *Indexing defaults*
-   calls for the geometric mean of indexed count, indexed fraction and RMSD.
-   The 50-bin rubredoxin reduction is the case that needs it: `fft1d` finds a
-   **1.50 px** solution on 1283 of 9102 spots and `min_indexed_fraction` (0.25)
-   throws it away, because the denominator is mostly junk that no lattice was
-   going to index. Doing this well probably means judging the fraction over a
-   resolution range the data actually support rather than the whole spot list.
-2. **Extend the ladder past `indexing.method`.** § *Indexing defaults* calls for
-   rungs over the threshold algorithm and `min_spot_size` too; only `method`
-   varies. This is now cheap to add, since the ladder already re-runs a subset
-   of exposures per rung — but a `min_spot_size` rung means re-running
-   `dials.find_spots`, which the current ladder does not do.
-3. **Warn when a cell is up against `max_cell`.** The cheapest remaining guard
-   against the failure item 2 of the done list only moved rather than removed:
-   compare the accepted cell's longest edge against the `max_cell` actually
-   used and say so when it is close. A cell longer than the 150 Å fallback
-   still truncates silently, exactly as the nearest-neighbour estimate did.
-4. ~~Decide what to do about `d_min` / `d_max`~~ — **redefined** 2026-10-09,
-   not removed. As spotfinding cuts they were dead: both routed through
-   `dials/util/masking.py::_apply_resolution_mask`, which builds a
-   `ResolutionMaskGenerator` from the beam, and a `PolychromaticBeam` has no
-   fixed `s0`, so any use crashed `dials.find_spots` with
-   *"PolychromaticBeam has no fixed s0"* at `beam.h(741)`. They now cut the
-   **integrated reflections** instead, in `combine`, by each reflection's own
-   `d` — which is the only place the cut can be made, since the resolution a
-   Laue-TOF pixel corresponds to depends on the wavelength that arrived there.
-   The cut lands before the SHELX export, the unmerged MTZ and the scaling, so
-   all three see the same data, and changing it costs nothing where
-   re-integrating would cost everything.
-   Deleting the two names instead was tried first and was worse: phil resolves
-   an unambiguous suffix, so a bare `d_min=1.8` silently became
-   `integration.calculated_d_min=1.8` and changed what was integrated. Keeping
-   the names and giving them a meaning that works removes that trap without the
-   pipeline having to police its own old spellings.
-   Where to cut is still a merging decision — prefer leaving both unset and
-   taking the limit from CC½ after scaling.
-5. **Finish `tests/regression/test_laue_tof.py`, then the docs.** Still 3 tests,
-   all gated on a MANDI file that may not be present; no SXD case, no converter
-   unit test, and `doc/sphinx/` has no laue_tof page at all. The multi-exposure
-   restructure is untested except by hand, which makes this more pressing than
-   it was: the N=2 check used one indexable file copied twice, and nothing in
-   the suite would catch a regression in the exposure/`imageset_id` bookkeeping.
-6. **Re-add TOF binning as a separate step** that does not classify input on the
-   pipeline's behalf (see *Binning removed*, above). Worth more than it looks:
-   on rubredoxin the binning, not `max_cell`, is what decides whether the a axis
-   comes out 34.4 Å or halved to 17.2 Å, so the bin count is a parameter a run
-   may need to scan rather than inherit.
-
-**The scaling tail is written** (2026-09-21): `laue_tof_scale.py`, wired in as
-the `pointless` and `lawless` workflow steps, with the `scaling{}` phil scope.
-Verified end to end on the two-orientation NMX data - 2703 observations →
-`sorted.mtz` → `scaled.mtz` + `scaled_unmerged.mtz`, with GPR normalisation
-(reference 2.883 Å over 2.229-3.537 Å, squared-exponential kernel, length scale
-0.158, 49 training bins). The statistics are meaningless on that dataset, since
-it is the same exposure twice, but they parse and report.
-
-Things learned doing it:
-
-- **pointless is chosen by version, not by path.** CCP4 9 ships 1.13.6, which
-  drops the wavelength column; the local build is 1.16.1. Every candidate on
-  `$PATH` and in `$CCP4/bin` is asked its version (`POINTLESS version x.y.z` in
-  the banner), the first one newer than 1.13.6 wins, and a run that can only
-  find an old one stops with a message naming the version it found. The
-  wavelength column is still checked afterwards as a backstop.
-- **Both programs need absolute HKLIN paths.** lawless writes LAMBDANORM,
-  SCALES, ROGUES and the plot files into its working directory, so it is given
-  one of its own, and a relative HKLIN then resolves against the wrong place.
-  Worse, lawless reports that as *"LAUE requires a wavelength for every
-  observation, but HKLIN has no wavelength column"* - the file it could not open
-  has no columns at all - so a `Cannot open file` in the output is now caught
-  directly.
-- **lawless 0.0.1 writes invalid XML**: the document opens `<LAWLESS>` and closes
-  `</AIMLESS>`, left over from the rename, so every strict parser refuses it.
-  The reader repairs that one mismatch. Worth fixing in lawless.
-- Statistics live in `Result/Dataset/<name>/{Overall,Inner,Outer}`, not in an
-  `Overall` block, and the fitted curve in `WavelengthNormalisationGPR` or
-  `WavelengthNormalisationChebyshev`.
-
-**`laue_tof_mtz.py` is written** (2026-09-21) and wired in as the `unmerged_mtz`
-workflow step, writing `scale/unmerged.mtz` from the combined data with gemmi:
-H, K, L, `M/ISYM` = 1, `BATCH` in dataset 0; `I`/`SIGI`, `LAMBDA`, `ROT`,
-`XDET`/`YDET` in dataset 1; one batch record per orientation with `LDTYPE = 3`,
-the cell, `PHIRANGE = 1`, `BSCALE = 1`, the refined `UMAT` (column-major),
-`SOURCE`/`S0` anti-parallel to the beam and `ALAMBD`/`DELAMB` from that batch's
-wavelength range. `validate_unmerged_mtz` re-reads the file and fails loudly on
-each of the silent failures in the Step 7 table; `check_wavelength_column` is
-there for checking pointless output. Verified on the two-orientation NMX data:
-2703 observations, 2 batches, `ALAMBD` 2.84 Å, `DELAMB` 0.65 Å.
-
-**Both intensities go in one MTZ** (user, 2026-09-21): summation as `I`/`SIGI`
-and profile-fitted as `IPR`/`SIGIPR`, so the file serves either choice and the
-two can be compared after scaling. Consequences, all implemented:
-
-- A reflection whose profile fit failed gets the MTZ missing-number flag in
-  `IPR`/`SIGIPR`, never a zero, so a failed fit cannot be read as a measurement.
-- A poor profile-fit fraction no longer stops later orientations from attempting
-  the fit - it only decides which intensities the SHELX export uses - since the
-  MTZ wants both. Only an outright abort still falls back to summation.
-- The combine step drops `intensity.prf.*` from every table when any orientation
-  lacks it, because tables with different columns cannot be concatenated and an
-  MTZ column cannot cover only some observations. It says which orientation was
-  missing.
-- SHELX HKLF2 holds one intensity by construction, so `output.intensity` still
-  chooses there.
-
-**Integration is a two-axis decision, taken once per run** (2026-09-21):
-
-- `dials.tof_integrate` always writes `intensity.sum.*`; a profile method adds
-  `intensity.prf.*` **alongside** it. So a profile run that works gives both, and
-  "fall back to summation" is only needed for an outright failure.
-- Outright failure is real: `method=profile_1d_ibix` **aborts** on the NMX test
-  data (both masks, exit 134) with
-  `DIALS_ASSERT(A >= min_bounds[0] && A <= max_bounds[0])` at
-  `tof_profile_1d_ibix.h:246`. **Diagnosed 2026-09-22, and it is not NaN**
-  (an earlier note here guessed that): the fit runs on `y / intensity_max`, so
-  `A`, fixed at 1.0, is in normalised units, while `max_bounds[0] =
-  1e4 · intensity_max` is in raw units. Any data whose peak projected intensity
-  is below 1e-4 therefore fails the check — the scale decides, not the data.
-  The Lorentz correction is what puts it there, since `L = sin²θ/λ⁴` is applied
-  per pixel *before* the projection and is ~1e-3 at neutron wavelengths, which
-  is why this pipeline always takes the correction at integration (see
-  [Lorentz: exactly once](#lorentz-exactly-once)). It killed the whole run, not
-  one reflection, because the fit runs in a `ThreadPool` worker that catches
-  nothing, so the exception escaped the thread and terminated the process
-  without naming a reflection.
-  **Fixed upstream by [#3281](https://github.com/dials/dials/pull/3281)**
-  (built in 2026-09-22), which bounds `A` by the new phil
-  `profile_1d_ibix.min_A`/`max_A` instead of `1e4 · intensity_max`, and corrects
-  an inverted guard that had left `estimate_sigma_from_fwhm` dead — that second
-  half lifts the fit fraction on config3 from 11 % to 62 %. The thread-pool
-  behaviour is untouched, so any other throw still takes the run with it.
-  `integration.method` defaults to `profile_1d_ibix` with
-  `fallback_method=summation`, which is now a guard rather than a routine path.
-- A profile run finishing is **not** the method working: `profile_3d_gutmann`
-  completed on the same data but fitted **13 of 1359** reflections (~4 min,
-  against 7 s for summation), leaving an `intensity.prf` column covering 1 % of
-  the data. So `integration.min_profile_fraction` (default 0.5) is checked
-  after every successful profile run: below it, the summation intensities are
-  used, the remaining orientations skip the profile fit, and
-  `output.intensity=auto` exports `sum`. (Gutmann is not a priority - user,
-  2026-09-21 - it is kept only as a phil choice.)
-- The two foreground masks give **different data, not different quality
-  metrics of the same data** (summation, Lorentz on, `nproc=8`, one NMX
-  orientation):
-
-  | mask | wall | CPU | integrated | mean I/σ | median I/σ | mean foreground px | mean I |
-  |---|---|---|---|---|---|---|---|
-  | `ellipse` | 7.0 s | 4.5 s | 1359 | 36.5 | 29.8 | 71.6 | 1.49e-3 |
-  | `seed_skewness` | 26.5 s | 144 s | 1359 | 59.6 | 46.2 | 322.2 | 3.85e-3 |
-
-  CC between the two sets of intensities is 0.95; `seed_skewness` takes in ~4.5×
-  the foreground and 2.6× the intensity. Higher I/σ is **not** proof it is
-  better — only merging statistics after lawless can settle that, so
-  `mask=both` integrates each way on the **first** orientation, logs the
-  comparison, keeps the winner by `mask_metric`, and **reuses that mask for
-  every other orientation** so all batches are integrated alike.
-- `dials.export format=shelx` refuses its own `intensity=auto` when both
-  columns are present (*"Only 1 intensity option can be exported in this
-  format"*), so the export step always passes an explicit `intensity=`, chosen
-  from `output.intensity` (auto → profile when `intensity.prf.value` exists).
-
-**Notes carried out of the combine step:**
-
-- `dials.export` takes the Laue batch number straight from `imageset_id`, which
-  is 0 in every per-orientation file, so `combine` renumbers it to the position
-  of the experiment in the combined list (which is also where its imageset now
-  sits). Without that every orientation exports as batch 0 — one of the silent
-  failures listed in Risks. Batches are therefore **0-based** in the SHELX file;
-  the unmerged-MTZ converter must emit **1-based** batch numbers for MTZ/pointless.
-- `dials.tof_integrate` leaves **no record of the Lorentz correction** in its
-  output: with `corrections.lorentz=True` it multiplies the intensities and
-  variances by `L` in the C++ integrator and writes no column and no flag, so
-  only the line *"Adding Lorentz correction"* in its log says it happened. The
-  integrate step therefore stamps a `lorentz_applied` boolean column on
-  `integrated.refl`; it survives the combine (concat) and `dials.export`, the
-  combine step logs what it says, and orientations that disagree are rejected
-  rather than scaled together. The MTZ converter should carry it into the file
-  as well, and it is what drives the lawless `LORENTZ` keyword.
-- Identical `image=` values are **deduplicated by phil**, and `FileInput.resolve_paths`
-  resolves symlinks, so two links to one file end up as one input path (but still
-  two entries, hence two orientations). Worth knowing when constructing tests.
-
-**MANDI (ORNL) test case, added 2026-09-21** — `tests/regression/test_laue_tof.py`:
-
-- Data: `MANDI_13378.nxs.h5` (CuZnSOD, IPTS-37773), 3.2 GB of raw events,
-  copied off `/Volumes/Finke_NMX/Mandi/CuZnSOD/` into **`work/mandi/`**, which
-  is gitignored (`/work` in `.gitignore`). Too big for `dials_data`, so the
-  tests skip unless a copy is there or `XIA2_LAUE_TOF_MANDI` points at one.
-  The known cell, from the user's own lawless work on this dataset, is
-  **`P 65 2 2`, `65.73 65.73 151.88 90 90 120`**.
-- **MANDI is binned in place, not by essnmx** (user, 2026-09-21): dxtbx writes
-  the histogram into the event file itself - bin edges in
-  `entry/time_of_flight`, counts in `entry/<bank>_events/spectra` - which is
-  what `FormatMANDI` reads, and **the event data is kept**
-  (`remove_event_data=False`). `FormatMANDI` has no reader for a separately
-  reduced file yet; when it gets one, this goes back through `essmandi-reduce`.
-  `binning.essmandi_reduce` was removed and a generic `binning.tof_padding`
-  (100 us, the dxtbx default) added. **No instrument geometry is repeated in
-  xia2**: the panel size comes from `FormatMANDI._get_image_size()`, which can
-  be asked before the histogram exists, since the format instantiates on a raw
-  event file. `histogram_mandi_run` skips the work if the file already carries a
-  histogram, and one binning per file means `binning.integrate_bins` does not
-  apply (warned about, `index_bins` wins).
-- **Verified end to end on `MANDI_13378.nxs.h5`**: 50 bins of 337.4 us over
-  14639-31507 us written into the event file (which grew 3.220 -> 3.274 GB, the
-  events kept), then `dials.import` read it with **FormatMANDI, 40 panels, 50
-  TOF bins**, and spotfinding found **227 strong spots**; 10 m 35 s, almost all
-  of it the histogram. It did not index - not pursued yet; 227 spots off 40
-  panels is few, so `spotfinding.min_spot_size` (15, tuned for NMX) and the bin
-  count are the first things to try. With the histogram cached both tests run
-  in 10 s.
-- **Spotfinding and indexing parameters on MANDI** (all with the known cell,
-  `indexing.max_cell` from it, `d_min_start=4`):
-
-  | spot list | strong | fft3d | real_space_grid_search | fft1d |
-  |---|---|---|---|---|
-  | `min_spot_size=15` (NMX default) | 227 | fails | 147 (65 %) | 159 (70 %) |
-  | `min_spot_size=3` | 370 | 205 (55 %) | 227 (61 %) | 238 (64 %) |
-  | `min_spot_size=3` + `radial_profile` | 603 | 236 (39 %) | 282 (47 %) | 284 (47 %) |
-
-  Every solution refines to the right cell (65.7-66.2, 151.9-152.9 against the
-  known 65.73, 151.88). `min_spot_size=15` is **too big for this data**: of 558
-  spots found, 331 are smaller than 15 pixels, so it throws away 59 % of them,
-  and MANDI spots span few TOF frames at 337 us bins. It still indexes, just off
-  a third of the spots. `sigma_strong` makes almost no difference (366 spots at
-  2.0 against 370 at 3.0); `radial_profile` finds the most.
-  The phil default stays 15, which is what the NMX study chose - say if it
-  should change - but the step now **says so**: it reports how much of the spot
-  list the size filter took and, when that is over half, there is room to lower
-  it, and **fewer than 500 spots survive**, suggests `min_spot_size` and
-  `radial_profile`. That last condition matters: thresholding turns up tens of
-  thousands of one and two pixel candidates, so on NMX the filter discards 99%
-  of 187300 and leaves 2296 spots, which is not a problem, where MANDI loses 59%
-  of 558 and is left with 227.
-- **Two bugs in the indexing acceptance test, both found here**:
-  1. `min_indexed` was an absolute 250, so every good MANDI solution (147-284
-     indexed) was rejected and the orientation counted as "not indexed". It is
-     now a floor of 50 plus `min_indexed_fraction` (0.25 of the strong spots),
-     which travels between datasets: 65 % of 227 passes, while 300 of 2300 NMX
-     spots no longer would.
-  2. There was **no test on the residuals**, so the first method to index enough
-     reflections won. On MANDI that took fft3d at 3.31 px over
-     real_space_grid_search at 3.25 px, and with `radial_profile` it accepted
-     fft3d at **6.10 px**. Now `max_rmsd_px` (5.0) rejects a bad fit outright,
-     `target_rmsd_px` (2.0) stops the ladder when a solution is good enough,
-     and otherwise every method is tried and the **best by RMSD is kept** -
-     each attempt writes `indexed_<method>.{expt,refl}` and the chosen one is
-     copied to `indexed.{expt,refl}`.
-     Note this RMSD is over every indexed reflection, so it reads higher than
-     the `RMSD_X`/`RMSD_Y` in the dials.index log, which are post-outlier
-     rejection: MANDI is 3.25 px here where dials.index reports 1.5/1.6 px.
-  Verified: MANDI `min_spot_size=3` now walks fft3d (3.31) ->
-  real_space_grid_search (3.25) -> fft1d (5.42, rejected) and keeps
-  real_space_grid_search, 51 s. NMX is unchanged - fft3d 1927/2296 (83.9 %),
-  RMSD 1.52 px, accepted at once, 26 s.
-- **Two things in `FormatMANDI` had to be worked around**, both worth reporting:
-  1. `get_time_range_for_panel` returns `event_time_zero + event_time_offset`,
-     i.e. **seconds since the start of the run plus microseconds since the
-     pulse**. For this 23 h run it gives 14700-113000 where every event
-     actually arrives between 14739 and 31407 us, so histogramming over that
-     range would silently pile every event into the first few bins. It is also
-     a Python loop over all 4.8 M pulses of all 44 banks, minutes of work.
-     `_mandi_tof_range` takes min/max of `event_time_offset` instead - the
-     quantity `generate_histogram_data_for_panel` actually histograms - in
-     seconds, or uses `binning.min_time_bin`/`max_time_bin` when given.
-  2. `add_histogram_data_to_nxs_file` derives its bins from that range with a
-     `delta_tof` bin *width*. The step calls `write_histogram_data` with
-     explicit edges instead, so the bin *count* is the one asked for and the
-     event data is not scanned twice.
-
-  A third thing, not worked around: `generate_histogram_data_for_panel` builds a
-  pool task per pixel (65536 of them) and hands each one the panel's whole event
-  arrays, so a panel takes about a minute and a 40 panel run about 40 minutes.
-  The same histogram is a few seconds of `np.bincount` on
-  `pixel_index * nbins + bin_index`. Worth replacing, in dxtbx or here.
-- `run_import` names the format class in its errors and logs panels/TOF bins on
-  success: a reduced NMX file and a reduced MANDI file are both NXlauetof, and
-  an instrument-specific class that claims the wrong one fails deep in dxtbx.
-  (Seen with the essnmx route: `ess/nmx/nexus.py::_set_default_instrument`
-  writes `entry/instrument/name = "NMX"` unconditionally, so a MANDI reduction
-  is claimed by `FormatESSNMX`, whose `get_detector` does
-  `i = int(panel_name[-1])` into a three-entry NMX dict and raises
-  `KeyError: 2`. Fix that in essnmx before returning to that route.)
-
-**Rubredoxin (ESS NMX simulation), 2026-10-08** — the first dataset run since
-the move to `dials-dev`, and the case that showed `max_cell` has to be fixed.
-`rubr_splitbeamstop_mosaicity/.../5e11_x11000SPLIT_x10_mosaicity_18545527/0/scipp_output.h5`,
-`FormatESSNMX`, 3 panels, 100 TOF bins, 1.87–3.54 Å, geometric `d_min` 1.051 Å.
-
-- **The nearest-neighbour `max_cell` estimate halved the cell.** It returned
-  **23.3 Å** against a true longest axis of **44.1 Å**, so the basis search
-  truncated and `a` came back as 17.2 instead of 34.4. The correct cell was *in*
-  the candidate list, indexing 100 % of the centroids, and lost on volume score
-  to the halved one at 69 %. Any fixed value ≥ 45 Å gives
-  **34.4 35.3 44.1 · 90 90 90**, with the volume exactly doubled (26 749 →
-  53 590); `fft3d`, `fft1d` and a known-symmetry run all agree, and **P 21 21 21**
-  refines cleanly at 0.46 px. Indexed 273/872 (31.3 %) → **486/872 (55.7 %)**.
-- **`d_min_start = 4.0` starves the FFT**: 75 centroids of 872, against 428 at
-  2.0. The indexed count barely moves (484–486) but the median residual does —
-  **0.60 px → 0.45 px**. 5.0 fails outright. Worth lowering the default, though
-  the NMX study chose 4.0 for the difficult layouts, so check both before
-  changing it.
-- **A low indexed fraction is not automatically a bad solution, and the
-  acceptance test cannot tell the difference.** Per macrocycle: 97.2 % indexed
-  at `d_min` 2.00, 98.7 % at 1.83, 93.3 % at 1.66, 73.8 % at 1.49, 55.7 % at
-  1.32. The lattice explains ~98 % of everything above 1.8 Å; the 386 spots it
-  never indexes are a separate population — d 1.37–1.73 Å, 2θ **101–134°**,
-  median I **63** against 174 for the indexed, and **all of them on the two side
-  panels** (the forward panel indexes 136/136). Weak backscattering junk through
-  the size filter, not a lattice problem. So `min_indexed_fraction` (0.25) is
-  being judged against a polluted denominator — another reason to rank on more
-  than one number (item 3 above).
-- **`spotfinding.d_min` and `d_max` cannot work on TOF data.** The obvious way
-  to drop that junk crashes in `dials.find_spots`: both options route through
-  `dials/util/masking.py::_apply_resolution_mask` → `ResolutionMaskGenerator`,
-  which needs a fixed `s0`, and a `PolychromaticBeam` has none —
-  `RuntimeError: PolychromaticBeam has no fixed s0`, `beam.h(741)`. The two
-  options are therefore dead as written (`laue_tof_phil.py:46`). A pixel mask is
-  the wrong mechanism; this has to be a filter in reflection space, or the
-  options should go.
-- **Payoff, whole pipeline**, with `indexing.max_cell=60 indexing.d_min_start=2.0`:
-  reflections integrated **193 → 374**, I/σ 19.4 → 21.1, RMSD 0.59 → 0.45 px.
-
-### One run, processed together (2026-10-08)
-
-The exposures of a run are handed to each DIALS program as one
-multi-experiment set, in a single `run/` directory. `orientation_N/` and
-`process_exposure` are gone. What this turned up:
-
-- **`joint_indexing` has to be given explicitly, and DIALS cannot work it
-  out.** A TOF experiment carries a goniometer and a scan over its bins, so
-  `is_still()` is **False**, and with more than one experiment
-  `joint_indexing=Auto` takes the all-rotation branch and aborts the run:
-  *"Unable to set joint_indexing automatically: set 'joint_indexing=True' for
-  multi-axis data from a single crystal or 'joint_indexing=False' for data from
-  multiple samples"*. `indexing.joint_indexing=False` is therefore hard-coded.
-- **The ladder is walked over the set, not per exposure.** One `dials.index`
-  call covers every exposure still wanting a solution; the next method is run
-  on just those that are left, and a final rung seeds the remainder from the
-  best crystal found. An exposure that reaches `target_rmsd_px` drops out; one
-  that is merely acceptable stays in, so a later rung can better it, and the
-  best attempt by RMSD is what is kept.
-- **The output of `dials.index` cannot be read positionally.** With
-  `joint_indexing=False` it indexes in a `ProcessPoolExecutor` and extends the
-  experiment list inside an `as_completed` loop, so **experiment order is
-  completion order**, and exposures that fail are dropped entirely — the output
-  list is shorter than the input and in an arbitrary order. What *is* reliable
-  is `imageset_id`: the code resets it to the original index with the comment
-  `# reset the imageset id to the original`. Every mapping back to an exposure
-  goes through it.
-- **A rung that solves nothing writes a column-less reflection table**, and
-  asking that for a flag raises `DXTBX_ASSERT(it != end())` rather than
-  returning nothing. Guarded on `refl.size()` and `"flags" in refl`.
-- **`dials.tof_integrate` assumes one detector shape and one TOF binning** for
-  the whole set — `image_size` and `tof_size` are read from `experiments[0]`
-  and applied to all. Two reductions of the same run at 50 and 100 bins import
-  together without complaint, so `_check_uniform` now rejects that up front.
-- **`spotfinding.max_strong` is now per exposure.** What it guards is an
-  assertion in the TOF reflection predictor, and `dials.refine` treats each
-  exposure as its own job (*"independently-refined groups of experiments have
-  been recombined"*), so one exposure's spot list is what reaches the
-  predictor however many there are.
-- **`panels=hierarchical` is a no-op without a level.** The NMX detector
-  hierarchy is flat — three panels on one root group — so the DIALS default
-  `hierarchy_level=0` is the whole detector as one rigid body and refines
-  exactly what `automatic` does: 16 parameters, byte-identical residuals.
-  Level 1 reaches the panels, 28 parameters, and on the N=2 test takes the
-  per-panel RMSD to 0.32 px. Both are hard-coded as `DETECTOR_PANELS` and
-  `DETECTOR_HIERARCHY_LEVEL`; exposing the level as phil is a one-liner if an
-  instrument with a deeper hierarchy turns up.
-- `combine` no longer concatenates N directories. The run is already one pair
-  of files, so it splits per exposure, assigns identifiers and renumbers
-  `imageset_id` for the batches.
-
-Verified on `rubr_splitbeamstop_mosaicity/...18545527`:
-
-| case | result |
-|---|---|
-| N=1, 100 bins | unchanged from before the restructure: 486/872 (55.7 %), 0.60 px, 386 reflections, 1 batch |
-| N=2 (one indexable file copied twice) | both index, **one** integrate call, 772 reflections, **2 batches** of 386, `validate_unmerged_mtz` passes at 2 batches, refine at 28 parameters |
-| N=4, 200 bins | exercises the failure paths: exposure 1 accepted at rung 1 and dropped from later rungs, 2 and 3 walk all three methods then the seeded rung, 4 skipped on `min_spots` (8 spots), run continues on the one that indexed |
-
-**When indexing blind, the TOF binning decides whether the cell is halved.** At
-100 bins the a axis comes out 34.4 Å; at both 50 and 200 bins it is 17.2 Å, with
-`max_cell=150` in all three — so `max_cell` is not what rescues it. **Giving the
-cell is**: with `indexing.unit_cell` and `space_group` supplied, the same 50-bin
-data refines to `34.70 35.56 44.42 90 90 90`, the full cell, and the median
-residual falls from 8.42 px to 1.57 px. (An earlier version of this paragraph
-said the binning decided it outright, which was measured without a known cell
-and is only true of blind indexing.)
-
-**Run these test datasets with the cell and symmetry given** (user, 2026-10-09):
-it is rare not to know them in a Laue-TOF experiment, so a blind run is the
-unusual case, not the default one to test. The ground truth for the rubredoxin
-simulations is in the McStas input, `Rubredoxin_solvent.lau`:
-
-```
-# Perdeuterated rubredoxin (F^2calc), Fe (III), C267-D386-N62-O87-S5'
-# SPCGRP P 21 21 21 (19) Orthorhombic
-# a=34.375, b=35.183, c=43.994; alpha=90.0, beta=90.0, gamma=90.0;
-```
-
-so `space_group="P 21 21 21" indexing.unit_cell=34.375,35.183,43.994,90,90,90`,
-which derives `max_cell` = 57.2 Å. On the 100-bin data that takes the N=2 run to
-482/872 at **0.45 px** against 486/872 at 0.60 px blind — slightly fewer
-reflections, since the constrained cell rejects some, at a third less residual.
-The blind numbers elsewhere in this section predate this and were measured
-without it.
-
-The 50-bin reduction is also where `min_indexed_fraction` bites hardest, with or
-without a cell: spot lists of 8–9 k are almost all junk, the best solution is
-1.57–1.71 px on ~1300 of 9102 spots, and the 25 % gate rejects every one of
-them. The strongest argument for the ranking change, item 1.
-
-**Environment**: `.venv/` in this repo is the interpreter for all of it — see
-[Environment](#environment-and-external-programs) below. `dials_known_orientation_centred_cell_issue.md`
-in the repo root is a ready-to-file DIALS bug report, with
-`dials_known_orientation_fix_check.py` as its verification script.
-
-**The DIALS build moved to `dials-dev` (2026-10-08).** `.venv` was rebuilt on
-`/Users/aaronfinke/dials/dials-dev/conda_base` (python 3.13.15, branch
-`tof-profile-1d-mantid`, `7e37c2844`); the old one is kept as
-`.venv.old-v3-30-0`. What forced it, and the trap to remember:
-
-- **`dials-v3-30-0` is a broken install.** Its working tree is clean at `main`
-  (`14f881d4a`), where `TOFProfile1DIBIXParams` takes 7 doubles and
-  `tof_integrate.py:518` passes 7 — but `build/lib/dials_algorithms_tof_integration_ext.so`
-  was compiled from the 8-double source of #3281 and still wants 8. So
-  `method=profile_1d_ibix` dies in Boost.Python with a bare
-  `__init__(_object*, double × 8, int, bool, bool)` and the run falls back to
-  summation. **A stale `.so` against a reverted checkout reads exactly like a
-  bug in this pipeline.** Either rebuild that tree's extensions or do not use it.
-- xia2 resolves every DIALS program with `shutil.which` (`data_integration.py:121`),
-  so **whatever is on `$PATH` wins** regardless of which python the venv runs.
-  `export PATH=/Users/aaronfinke/dials/dials-dev/conda_base/bin:$PATH` is still
-  required — `.venv/bin` holds no DIALS dispatchers.
-- No editable `dxtbx` install this time: `dials-dev/conda_base` already resolves
-  `dxtbx` to `dials-dev/modules/dxtbx/src`, so the old venv's
-  `_editable_impl_dxtbx.pth` was redundant. numpy stayed at the DIALS build's
-  **2.4.6** (installed under a constraint); `.venv/share/cctbx` and
-  `.venv/bin/pytest` were remade by hand, as they must be after any rebuild.
-- `dials-dev` also offers a method `dials-v3-30-0` does not:
-  **`profile_1d_mantid`**. `integration.method` is a free string, not a phil
-  choice, so it is already selectable — untested here.
+Pass the cell and symmetry; it is rare not to know them in a Laue-TOF experiment.
+For the NMX rubredoxin simulations the truth is in the McStas input
+`Rubredoxin_solvent.lau`: `P 21 21 21`, `34.375 35.183 43.994 90 90 90`. PPase is
+`C 1 2 1 106.1 95.5 113.7 90 98.1 90`; MANDI CuZnSOD is
+`P 65 2 2 65.73 65.73 151.88`. It matters: blind, the 50-bin rubredoxin data
+returns a halved cell (a = 17.2 Å) at 8.42 px; with the cell given, the full
+`34.70 35.56 44.42` at 1.57 px.
 
 ## Context
 
-xia2 has no support for neutron **Laue time-of-flight (TOF)** data. All existing
-pipelines assume monochromatic X-rays (a single scalar wavelength per sweep, e.g.
-`XWavelength.set_wavelength`), and `load_imagesets` filters to rotation
-`ImageSequence` only. Neutron TOF Laue is polychromatic: each reflection's
-wavelength is derived from its arrival time, the beam is a `PolychromaticBeam`,
-and intensities must be normalised by an incident spectrum (vanadium) and
-corrected for background (empty run) and absorption.
+xia2 had no neutron Laue-TOF support: existing pipelines assume one scalar
+wavelength per sweep and `load_imagesets` keeps only rotation sequences. Laue-TOF
+is polychromatic — each reflection's wavelength comes from its arrival time, the
+beam is a `PolychromaticBeam`, and intensities need normalising by an incident
+spectrum (vanadium), background (empty run) and absorption.
 
-DIALS (the tested dev environment at `/Users/aaronfinke/dials/dials-dev`, reached
-through this repo's `.venv`) already provides the complete
-TOF toolchain — this task wires those tools into a single xia2 command so a user
-can go from raw images to combined/exported intensities in one call. The final
-**wavelength normalisation, scaling and merging** stage is done by two CCP4-side
-programs built locally: **POINTLESS 1.16.1** (`/Users/aaronfinke/pointless`) and
-**LAWLESS 0.0.1** (`/Users/aaronfinke/aimless`, the Laue branch of aimless).
+**Experiment shape**: one crystal, several **stationary** exposures at different
+settings. Each exposure is a full Laue-TOF measurement (a stack of TOF bins, one
+`ImageSequence`) with the crystal still — the contrast with rotation
+crystallography. The whole run goes through the DIALS steps together, then combine
+→ unmerged MTZ → POINTLESS → LAWLESS. Instruments: ISIS SXD (the only public
+`dials_data`), MaNDi, ESS NMX.
 
-**Experiment type**: a **single crystal measured as multiple stationary exposures
-at different orientations** ("settings"). Each exposure is itself a full Laue-TOF
-measurement — a stack of TOF bins imported as one `ImageSequence` — recorded with
-the crystal held **stationary during the exposure**. This is the key contrast with
-standard rotation crystallography, where the crystal rotates during each exposure.
-The pipeline therefore processes each orientation independently (import →
-find_spots → index → refine → tof_integrate) and then **combines the integrated
-results across orientations**, writes one unmerged Laue MTZ, and passes it through
-POINTLESS → LAWLESS to produce scaled/normalised merged and unmerged data. Primary
-instrument **ISIS SXD** (the only one with public `dials_data`), but format-agnostic
-so MaNDi / ESS NMX work too.
+DIALS supplies the TOF toolchain; this wires it into one command. Scaling is done
+by two locally built CCP4-side programs, POINTLESS 1.16.1 and LAWLESS 0.0.1 (the
+Laue branch of aimless).
 
-Where the input is **not already TOF-binned**, the pipeline first reduces it with
-**essnmx** (`/Users/aaronfinke/ess/packages/essnmx`) — see
-[Step 0](#step-0-new-tof-binning-with-essnmx).
+## Decisions
 
-The proven DIALS recipe (from the `isis_sxd_nacl_processed` dataset provenance)
-is what the pipeline automates per exposure:
-```
-dials.import  sxd_nacl_run.nxs
-dials.find_spots  imported.expt
-dials.index  imported.expt strong.refl unit_cell=5.64,5.64,5.64,90,90,90 space_group=225
-dials.refine  indexed.expt indexed.refl
-dials.tof_integrate  refined.expt refined.refl [corrections.incident_run=vanadium] [corrections.empty_run=empty]
-dials.export format=shelx  integrated.expt integrated.refl
-```
-with `dials.refine_bravais_settings` added after indexing (user request) for
-lattice-symmetry determination, a combine step across all orientations, and then
-the new scaling tail:
-```
-<xia2 converter>            combined.{expt,refl} -> unmerged.mtz   (LAMBDA, M/ISYM, batch headers)
-pointless HKLIN unmerged.mtz HKLOUT sorted.mtz   (LAUEGROUP / CHOOSE SPACEGROUP given explicitly)
-lawless   HKLIN sorted.mtz   HKLOUT scaled.mtz   (PROBE NEUTRON, LAUE NORMGPR ...)
-```
+- No `dials.scale`/`dials.merge` — monochromatic only. Lawless replaces them.
+- Vanadium and empty runs optional but recommended; corrections skipped if absent.
+- SHELX HKLF2 of the unscaled combined data is a checkpoint; lawless's scaled MTZ
+  is the deliverable.
+- Indexing defaults come from the NMX study, not DIALS' own, and indexing is a
+  **retry ladder with an acceptance test**, not one call.
+- Formats: `FormatISISSXD`, `FormatMANDI`, `FormatESSNMX`. The `*Laue` variants are
+  for TOF-flattened data and are out of scope.
+- `refine_bravais_settings` stays a toggleable, informational step.
+- Local pointless/lawless builds, not CCP4 9's — paths are phil-configurable.
 
-## Decisions (confirmed with user)
+## DIALS facts worth knowing
 
-- Command name: **`xia2.laue_tof`**
-- Data: **one crystal, multiple stationary exposures at varying orientations**
-  (crystal stationary during each exposure).
-- Scope: **full pipeline**, per exposure import → find_spots → index →
-  refine_bravais_settings → refine → tof_integrate, then **combine all orientations**,
-  write an **unmerged Laue MTZ**, and finish with **POINTLESS (sort/symmetry) →
-  LAWLESS (wavelength normalisation, scaling, merging)**. SHELX HKLF export of the
-  unscaled combined data is kept as a checkpoint; the scaled/merged MTZ from lawless
-  is the primary deliverable. No `dials.scale`/`dials.merge` — those are
-  monochromatic-only; lawless replaces them (and LSCALE) for Laue.
-- Vanadium (`incident_run`) + empty (`empty_run`) runs: **optional, recommended** —
-  passed to `dials.tof_integrate` when given, corrections skipped when absent.
-- Regression testing against **ISIS SXD** (`dials_data("isis_sxd_example_data")`).
-- Include **`dials.refine_bravais_settings`** as a lattice-determination step.
-- **Indexing defaults come from the NMX parameter study**, not from the DIALS/ToF
-  auto-defaults, and indexing is a **retry ladder with an acceptance test**, not a
-  single call — see [Indexing defaults](#indexing-defaults-from-the-nmx-study).
-- **Formats**: `FormatISISSXD`, `FormatMANDI`, `FormatESSNMX`. The `*Laue`
-  variants (`FormatMANDILaue`, `FormatESSNMXLaue`) are for TOF-flattened, true
-  Laue data and are **out of scope** here.
-- **Un-binned input is reduced in-pipeline by essnmx**, chosen on the input file's
-  NeXus type (NXlauetof = ready; TOFRAW / NXsnsevent = bin first) — see
-  [Step 0](#step-0-new-tof-binning-with-essnmx).
-- **Local program builds, not the CCP4 9 ones**: pointless must be **> 1.13.6**
-  (the CCP4-9 build drops the wavelength column, which makes `LAUE` fatal in
-  lawless); lawless is not in CCP4 at all yet. Both are PHIL-configurable paths.
+- `ExperimentList.all_tof()` / `all_laue()` identify this data. Assert `all_tof()`
+  after import.
+- **Avoid `FormatMANDILaue` / `FormatESSNMXLaue`**: they read the `laue_data` group,
+  flattened in TOF, which is a different problem. Their `understand()` keys on
+  `"laue_data" in …detector_panel_0`, so a file holding both groups can be claimed
+  by the wrong one. `FormatESSNMX_McStas` is for the superseded McStas format;
+  current McStas output is identical to real NMX data.
+- `dials.find_spots` auto-selects `TOFSpotFinder`.
+- `dials.tof_integrate` options live under `corrections{}`, not top level, and
+  `corrections.lorentz` **defaults to False**.
+- **`dials.export format=mtz` is refused for TOF data**, and would be wrong anyway:
+  no per-reflection wavelength, `M/ISYM = 0`, `LDTYPE = 2`. Hence xia2's own writer.
+- `dials.export format=shelx` takes the batch from `imageset_id`, which is 0 in
+  every per-exposure file — the combine step renumbers it.
+- `dials.tof_integrate` leaves **no record of the Lorentz correction**: it
+  multiplies intensities in C++ and writes no column or flag, only a log line. So
+  the integrate step stamps a `lorentz_applied` column, which survives combine and
+  export.
 
-## DIALS building blocks (all verified present; originally against 3.30)
+## Gotchas found on real data
 
-- **Import / formats**: `FormatISISSXD`, **`FormatMANDI`**, **`FormatESSNMX`**
-  produce an `ImageSequence` (images = TOF bins) with `PolychromaticBeam` +
-  `Spectrum` + `Scan`, `Probe = neutron`. `ExperimentList.all_tof()` /
-  `all_laue()` identify such data.
-  `FormatESSNMX_McStas` (in the same file, keyed on
-  `entry/metadata/mcstas_weight2count_scale_factor`) is for the superseded McStas
-  format and is **not** used — current McStas output is identical to real NMX data.
-  **Not `FormatMANDILaue` / `FormatESSNMXLaue` either.** Those subclass the TOF
-  formats but read the `laue_data` group — the data **flattened in the TOF
-  dimension** — which is true (wavelength-integrated) Laue, a different processing
-  problem. This pipeline is Laue-TOF: the TOF axis is the signal, so it must stay.
-  The `understand()` of each `*Laue` class keys on `"laue_data" in entry/instrument/detector_panel_0`,
-  so a file carrying both groups can be claimed by the wrong class — pass
-  `format.name`/an explicit format class at import if that is ever seen, and assert
-  `ExperimentList.all_tof()` on `imported.expt` before going further.
-- **Spot finding**: `dials.find_spots` auto-selects `TOFSpotFinder` for TOF
-  experiments (adds initial per-reflection wavelengths; TOF reciprocal-space
-  proximity filter).
-- **Indexing**: `dials.index` — works when unit cell + space group are supplied
-  (TOF gives wavelength per spot), and also indexes many cases with no known cell.
-  **The defaults matter a great deal and the DIALS/ToF auto-defaults are not the
-  right ones** — see [Indexing defaults](#indexing-defaults-from-the-nmx-study)
-  below. Expose `indexing.method` across `fft3d | fft1d | real_space_grid_search`
-  (plus `pink_indexer | low_res_spot_match` as polychromatic fallbacks) and make it
-  cheap to retry a failed orientation with a different method.
-- **Bravais settings**: `dials.refine_bravais_settings` **works with polychromatic /
-  TOF-Laue experiments in DIALS 3.30** (confirmed by user). xia2 already wraps it at
-  `src/xia2/Wrappers/Dials/RefineBravaisSettings.py` (reads `bravais_summary.json`).
-- **Integration**: `dials.tof_integrate` (`dials/algorithms/integration/tof`) —
-  `method = summation | profile_1d_ibix | profile_3d_gutmann`,
-  `integration_type = observed | calculated`,
-  `background_model = constant2d | constant3d | linear2d | *linear3d`,
-  `mask = ellipse | seed_skewness`, `bbox_tof_padding` / `bbox_xy_padding`,
-  `wavelength_range`, `mp.nproc`, and phil **`corrections.incident_run` /
-  `corrections.empty_run` / `corrections.lorentz` / `corrections.absorption.{incident,target}_spectrum{…}`**
-  (incident-spectrum defaults tuned for SXD vanadium). Note the exact scope names —
-  they are under `corrections{}`, not top level. Outputs carry `wavelength_cal`
-  per reflection.
-  **`corrections.lorentz` defaults to `False`** (`tof_integrate.py:104`): the TOF
-  Lorentz factor is *not* applied unless asked for. This couples directly to the
-  lawless `LORENTZ` keyword — see [Lorentz: exactly once](#lorentz-exactly-once).
-- **Export**: `dials.export format=shelx` handles `all_laue()/all_tof()` — writes
-  HKLF2 with per-reflection `wavelength_cal` and Laue batch numbers (batch =
-  `imageset_id`/`id`, i.e. one per orientation; `dials/util/export_shelx.py`).
-  **`format=mtz` is refused for TOF data** — `dials/command_line/export.py:362`
-  raises *"Time-of-flight Laue data cannot be exported as .mtz. Run with
-  format=shelx to export as .hkl"*. Even if it were not, `export_mtz.py` writes no
-  per-reflection wavelength column, sets `M/ISYM = 0` and `LDTYPE = 2`. **xia2 must
-  therefore write the unmerged Laue MTZ itself** (see the converter below); this is
-  the "in-between step" the pointless/lawless tail needs.
+Each cost a session; none is visible from the code.
 
-## Step 0 (new): TOF binning with essnmx
+- **`joint_indexing` must be passed explicitly.** A TOF experiment has a goniometer
+  and a scan over its bins, so `is_still()` is False; with >1 experiment
+  `joint_indexing=Auto` takes the all-rotation branch and aborts. Hard-coded False.
+- **`dials.index` output cannot be read positionally.** With `joint_indexing=False`
+  it indexes in a process pool and extends the experiment list inside an
+  `as_completed` loop, so order is completion order, and failures are dropped — the
+  list is shorter than the input, in an arbitrary order. `imageset_id` is reliable
+  (DIALS resets it to the original index); everything maps back through it.
+- **A rung that solves nothing writes a column-less reflection table**, which raises
+  `DXTBX_ASSERT(it != end())` when asked for a flag.
+- **`dials.tof_integrate` assumes one detector shape and TOF binning** for the set,
+  reading `image_size`/`tof_size` from `experiments[0]`. Two reductions of one run
+  at 50 and 100 bins import together without complaint, so import rejects that.
+- **`panels=hierarchical` is a no-op without a level.** The NMX hierarchy is flat
+  (three panels on one root group), so level 0 is the whole detector as one body —
+  16 parameters, identical residuals to `automatic`. Level 1 reaches the panels, 28
+  parameters, per-panel RMSD 0.32 px.
+- **`max_strong` is per exposure**, since the predictor assertion it guards is
+  reached per refinement job (`dials.refine` refines each exposure separately and
+  recombines).
+- **`spotfinding.d_min`/`d_max` cannot exist.** A DIALS resolution cut is a pixel
+  mask built from a `ResolutionMaskGenerator`, which needs a fixed `s0` that a
+  `PolychromaticBeam` lacks (`PolychromaticBeam has no fixed s0`, `beam.h(741)`),
+  and a Laue-TOF pixel's resolution depends on the wavelength that arrived there.
+  Top-level `d_min`/`d_max` therefore cut the **integrated reflections** in
+  `combine`, by their own `d`, before export, MTZ and scaling. Deleting the names
+  instead was worse: phil resolves an unambiguous suffix, so `d_min=1.8` silently
+  became `integration.calculated_d_min=1.8`.
+- **`max_cell` must never be left to DIALS.** On rubredoxin the nearest-neighbour
+  estimate gave 23.3 Å for a 44.1 Å axis and returned a halved cell that passed
+  every acceptance check — right space group, 0.59 px, 31 % indexed. It is always
+  fixed now: `max_cell_multiplier` × the longest edge of a given cell, else
+  `max_cell_fallback` = 150 Å. Verified at 150 on rubredoxin (34×35×44) and PPase
+  (primitive 71.7×71.7×114.5, where the estimate happens to land at 149.4 Å).
+- **MANDI's `c` is 151.88 Å**, longer than the fallback — it supplies a cell, so the
+  derived rule covers it, but a MANDI-like run indexed blind would not be.
+- **`FormatMANDI` hard-codes a 2.0–4.0 Å band** where the histogram gives 1.92–4.08,
+  which alone moves its geometric `d_min` from 1.066 to 1.027 Å. So the wavelength
+  range is derived from the scan, not from `beam.get_wavelength_range()`.
+- **`min_spot_size` 15 is tuned for NMX and is too big for MANDI**, where it
+  discards 59 % of 558 spots. On NMX it discards 99 % of 187 300 and leaves 2296,
+  which is not a problem. The step reports the fraction and advises only when few
+  spots survive.
+- **TOF binning changes what indexes.** Blind, rubredoxin gives the full cell at 100
+  bins and a halved one at 50 and 200 — `max_cell` does not rescue it, a known cell
+  does. Binning is a parameter, not a default.
+- **Identical `image=` values are deduplicated by phil**, and `resolve_paths`
+  resolves symlinks, so two links to one file become one path but still two entries.
+  Use real copies to fake a multi-exposure test.
 
-`dials.import` needs a **TOF-binned** file: raw event data is not read by
-`FormatESSNMX` or `FormatMANDI`, so it must be reduced first, by **essnmx**
-(`/Users/aaronfinke/ess/packages/essnmx`, the `ess.nmx` / `ess.mandi` packages of
-the scipp ESS monorepo). McStas simulations now export the same format as real NMX
-data, so they take exactly this path — **`FormatESSNMX_McStas` and
-`essnmx_reduce_mcstas` are for the old McStas format and are out of scope**.
+### Two DIALS defects
 
-### Deciding whether to bin
+1. **`known_symmetry.A_matrix` corrupts a centred cell.** The indexer expects a
+   primitive-setting crystal; the conversion in `known_orientation.py` assigns to
+   the loop variable and is discarded, while `_apply_symmetry_post_indexing`
+   converts an already-centred cell again (`C 1 2 1 106.1 96.1 114.4 · 98.1` →
+   `184.1 158.6 102.1 · 90`). Convert in the caller, which makes the missing
+   conversion a no-op; the acceptance test's cell check would catch a fixed DIALS
+   converting twice.
+   ```python
+   cb_op = crystal.get_space_group().info().change_of_basis_op_to_primitive_setting()
+   A = crystal.change_basis(cb_op).get_A()
+   ```
+2. **TOF predictor assert on large spot lists** — around 40 000 reflections trips
+   `DIALS_ASSERT(table.nrows() == h.size())` in `reflection_predictor.h` during
+   refinement. Hence `max_strong`.
 
-Classify the input file by its NeXus entry before anything else — this is the check
-that decides whether Step 0 runs:
-
-| file | marker | action |
-|---|---|---|
-| **NXlauetof** (already reduced/binned) | `entry.attrs["NX_class"] == "NXlauetof"`, `entry/definitions == "NXlauetof"`; panels carry `data` + `time_of_flight` | none — hand straight to `dials.import` |
-| **NXTOFRAW** (raw NMX) | `entry/definition == "TOFRAW"`, or an `NXentry` whose `instrument` holds choppers / `instrument_xml` and event-style panels | `essnmx-reduce` |
-| **NXsnsevent** (raw MANDI) | `entry` NX_class / `definition` of `NXsnsevent`; `instrument/name == "MANDI"` | `essmandi-reduce` |
-
-Verified against real files: `ppase_allconfigs/cco/config1_binned{50,200}.h5` classify
-as `nxlauetof`, `config1_sampling_output.h5` as `tofraw`. Implement this as one
-small `classify_input(path)` helper in `laue_tof_programs.py` (h5py only, no scipp
-import needed for the decision), and log the verdict per input file.
-
-### Running the reduction
-
-All three entry points are console scripts of `essnmx`, driven exactly like the
-DIALS steps (`subprocess.run`):
-
-```
-essnmx-reduce   --input-file raw.h5             --nbins 50 --output-file binned50.h5
-essmandi-reduce --input-file mandi_event.nxs.h5 --nbins 50 --output-file binned50.h5
-```
-
-Relevant options, all of which should be reachable from xia2 PHIL:
-`--nbins` **or** `--time-bin-width` (mutually exclusive), `--min-time-bin` /
-`--max-time-bin` / `--time-bin-unit`, `--detector-ids`, `--compression`,
-`--output-dir`, `--overwrite`.
-
-This is where the
-[binning recommendation](#tof-binning-is-a-pipeline-parameter) is actually
-implemented: when the input is raw, xia2 can produce **both** reductions from one
-raw file — a coarse one to index against and a fine one to integrate — instead of
-making the user pre-bin twice. PHIL:
-
-```
-binning {
-  enabled = Auto            # Auto = bin only if the input is not NXlauetof
-  index_bins = 50
-  integrate_bins = 200
-  time_bin_unit = *us ms ns
-  min_time_bin = None  max_time_bin = None
-  detector_ids = None
-  essnmx_reduce = None      # executable; default: PATH lookup
-  keywords = None           # extra raw CLI args appended
-}
-```
-
-with `binning.enabled=False` to force "use the file as given", and the reduced files
-written into the per-exposure subdirectory so a re-run does not redo them.
+Also unfixed: the TOF profile fit runs in a `ThreadPool` worker that catches
+nothing, so any throw kills the process rather than one reflection. That is what
+the ellipse-mask defect (`compute_weighted_ellipsoid`, "Values must not all be
+zero") rides on — use `mask=seed_skewness` on sparse data.
 
 ## Indexing defaults (from the NMX study)
 
-Source: `/Users/aaronfinke/ppase_allconfigs/NMX_indexing_recommendations.html` and
-`NMX_indexing_study.html` (PPase, C 1 2 1, 106.1 95.5 113.7 90 98.1 90; 4,172
-indexing trials over eleven simulated ESS NMX detector layouts at two TOF
-binnings, DIALS 3.30 + optuna), plus the second study on
-`/Users/aaronfinke/ppase_allconfigs/cco` (CcO, P 21 21 21, 182 204 178). Per-run
-recipes live in `configN/opt_NNbins/best/` and `best_by_balanced/` as
-`find_spots.phil`, `index.phil`, `run.sh`, with every trial in `results.jsonl`.
+Source: `~/ppase_allconfigs/NMX_indexing_{recommendations,study}.html` (PPase,
+`C 1 2 1`, 4172 trials over eleven simulated NMX layouts at two binnings, DIALS
+3.30 + optuna), plus `~/ppase_allconfigs/cco` (CcO, `P 21 21 21`, 182 204 178).
+Per-run recipes in `configN/opt_NNbins/best*/`; every trial in `results.jsonl`.
+The search took datasets that autoindex from 4 of 22 to 15 of 22, and best RMSD
+from 2.3 px to 0.59 px. **These numbers were measured on 3.30, not dials-dev.**
 
-The search took NMX datasets that autoindex from 4 of 22 to 15 of 22, and best
-positional RMSD from 2.3 px to 0.59 px. The changes worth baking in as
-`xia2.laue_tof` defaults:
-
-| parameter | DIALS/ToF default | xia2.laue_tof default | why |
+| parameter | DIALS default | here | why |
 |---|---|---|---|
-| `spotfinder.filter.min_spot_size` | 6 (ToF auto) | **15** (search 8–25) | the largest single improvement. 6 admits small split peaks; raising it drops positional RMSD from 2.3 px to 0.6–0.8 px on the same data, at some cost in reflection count. Balanced picks land at 14–24 in five of six near layouts |
-| `spotfinder.threshold.algorithm` | `radial_profile` for ToF | **`dispersion_extended`**, keep `radial_profile` as first fallback | wins on four of six near PPase layouts. On the CcO data `radial_profile` wins more often — so this is a *default*, not a rule, and both must stay easy to select |
-| `indexing.method` | `fft3d` | **`fft3d`** near, **`fft1d`** for distant/sparse layouts | `fft1d` is the finding of the study: the only method that indexed config8 and config10 (1 m panels). Its 1-D projection does not need a well-populated 3-D reciprocal-space grid, which a narrow recorded wedge cannot provide. `real_space_grid_search` is the other near-layout winner |
-| `indexing.max_cell` | Auto | **always fixed** — `max_cell_multiplier` (1.3) × the longest edge of a given `unit_cell`, else `max_cell_fallback` = 150 Å. Study range: 120–150 Å for PPase, ≈ 230 Å for CcO | nearest-neighbour estimation is unreliable on sparse Laue-TOF spot lists; *every* difficult-layout success used a fixed value. Implemented 2026-10-08 |
-| `refinement.reflections.outlier.algorithm` | `auto` | **`mcd`**, `tukey.iqr_multiplier` 0.6–1.0, `separate_panels=True` for multi-panel | the distant layouts carry a heavy residual tail (median 0.55 px, p99 26 px, p99/p50 = 47.6 against 8.9 for a good layout). A tight cut is what let config8 index at all |
-| `indexing.refinement_protocol.d_min_start` | Auto | **≈ 4.0** | starting low-resolution helps the difficult layouts; immaterial for the near ones |
+| `min_spot_size` | 6 | **15** | the largest single improvement: RMSD 2.3 → 0.6–0.8 px, at some cost in count |
+| `threshold.algorithm` | `radial_profile` | **`dispersion_extended`** | wins on four of six near PPase layouts; `radial_profile` wins more often on CcO, so a default, not a rule |
+| `indexing.method` | `fft3d` | **ladder** `fft3d` → `real_space_grid_search` → `fft1d` | `fft1d` was the finding: the only method that indexed the 1 m layouts, its 1-D projection not needing a populated 3-D grid |
+| `max_cell` | Auto | **always fixed** (see Gotchas) | NN estimation is unreliable on sparse spot lists; every difficult-layout success used a fixed value |
+| `outlier.algorithm` | `auto` | **`mcd`**, iqr 0.8, `separate_panels=True` | distant layouts carry a heavy residual tail (p99/p50 47.6 against 8.9) |
+| `d_min_start` | Auto | **4.0** | helps the difficult layouts, immaterial for the near ones |
 
-Design consequences for the pipeline:
+Consequences:
 
-- **Ship a retry ladder, not one recipe.** Near the indexing boundary success is a
-  *rare event*, not a property of the data: config8 landed 2 acceptable solutions in
-  212 trials, config11 4 in 190, config10 74 in 330. A single default recipe will
-  fail on data that is perfectly indexable. `indexing` should therefore accept an
-  ordered list of strategies and try them in turn — vary `method` (`fft3d` →
-  `real_space_grid_search` → `fft1d`), then threshold algorithm, then
-  `min_spot_size` — logging each attempt and stopping at the first solution that
-  passes the acceptance test below. Expose the whole ladder as PHIL so a site can
-  replace it, and let `indexing.strategy=<file.phil>` drop in a tuned
-  `index.phil` from `configN/opt_NNbins/best/` verbatim.
-- **Accept a solution on more than "it indexed".** The study's gate — refined cell
-  matches within tolerance, orientation within tolerance of a reference where one
-  exists, and a minimum indexed count — exists because maximising indexed *fraction*
-  alone selects a small clean spot list that indexes almost completely (88.7 % of
-  909 spots beating 72.1 % of 2,837), and because an a↔b swap can index 1,988
-  reflections on the wrong cell. Rank on the geometric mean of indexed count,
-  indexed fraction and RMSD quality, and log all three per orientation.
-- **Use the other orientations as the reference.** In this experiment every exposure
-  is the same crystal, so once one orientation indexes, its crystal model is the
-  natural seed for the rest (`known_symmetry.A_matrix` / `dials.index` with a
-  supplied orientation), and cross-agreement is a real check: six NMX
-  configurations indexed independently agreed on the orientation to a median of
-  0.04–0.09°. **Seeding also rescues layouts that never autoindex** — config7 and
-  config9 produced nothing in 480 and 330 de-novo trials but process normally when
-  given an orientation. This folds directly into the existing "consistent indexing
-  across orientations" item in Risks: index the easiest exposure first, seed the
-  rest, and treat a failure to autoindex as a reason to seed, not to stop.
-- **Watch for the two DIALS defects the study surfaced** (both reproduce in 3.30,
-  both worth reporting upstream):
-  1. `known_symmetry.A_matrix` **corrupts a centred cell**. Supplying an orientation
-     routes into `IndexerKnownOrientation`, which expects a primitive-setting
-     crystal; the conversion loop in `known_orientation.py` assigns to the loop
-     variable and discards the result, so it never happens, and
-     `_apply_symmetry_post_indexing` then converts an already-centred cell again
-     (C 1 2 1 `106.1 96.1 114.4 · 98.1` → `184.1 158.6 102.1 · 90`). **Convert in
-     the caller**, which makes the missing conversion a no-op:
-     ```python
-     cb_op = crystal.get_space_group().info().change_of_basis_op_to_primitive_setting()
-     A = crystal.change_basis(cb_op).get_A()
-     ```
-     xia2 must do this wherever it seeds an orientation.
-  2. **ToF reflection predictor assert on large spot lists** — around 40,000
-     reflections trips `DIALS_ASSERT(table.nrows() == h.size())` in
-     `reflection_predictor.h` during refinement. Cap the spot list (or catch and
-     retry with a stricter spot-finding recipe) rather than letting a long run die
-     in refinement.
+- **A ladder, not a recipe.** Near the boundary, success is a rare event rather than
+  a property of the data: config8 landed 2 acceptable solutions in 212 trials,
+  config11 4 in 190. One recipe will fail on indexable data.
+- **Accept on more than "it indexed".** Maximising indexed fraction alone picks a
+  small clean spot list (88.7 % of 909 beating 72.1 % of 2837), and an a↔b swap can
+  index 1988 reflections on the wrong cell. Rank on count, fraction and RMSD
+  together — **still outstanding**, item 1.
+- **Seed from a sibling.** Every exposure is the same crystal, and six NMX
+  configurations indexed independently agreed on orientation to 0.04–0.09°. Seeding
+  also rescues layouts that never autoindex: config7 and config9 gave nothing in
+  480 and 330 de-novo trials but process normally when seeded. So "did not index"
+  is a routine outcome — seed, log it, carry on.
+- **Binning is a parameter.** PPase indexes better coarse (50) and integrates
+  better fine (200); large-cell CcO prefers 200 for both (indexed fraction
+  0.70–0.84 against 0.24–0.58). A layout that fails at one binning is worth
+  retrying at the other.
 
-### TOF binning is a pipeline parameter
+## Resolution: observed, then calculated
 
-Where the input is a rebinnable TOF reduction (NMX/scipp, MaNDi), the number of TOF
-bins is a *choice*, and the two studies disagree about which way it points — so it
-must be a parameter, with the default stated and overridable:
+`integration_type=observed` integrates only the indexed spots — a few hundred of
+the tens of thousands the geometry reaches. `calculated` integrates every predicted
+reflection out to a limit, defaulting to the geometric one: `d = λ / (2 sin θ)` at
+the shortest wavelength and largest scattering angle any pixel sees, which nothing
+can be recorded beyond.
 
-- **PPase (small cell, 106–114 Å)**: every configuration has a higher indexable
-  ceiling at 200 bins (config8 by 174 %, config11 by 497 %), and **eight of the nine
-  comparable configurations autoindex *less* often at 200 bins** — config8 has the
-  study's largest ceiling, 4,701 reflections, and zero de-novo solutions in 190
-  trials. Recommended: **index at 50 bins, integrate at 200**, carrying the
-  orientation across. config11 is the lone exception, indexing only at 200.
-- **CcO (large cell, 182–204 Å)**: the balanced picks go the other way — 200 bins
-  gives both the better indexed fraction (0.70–0.84 against 0.24–0.58) and far
-  better orientation agreement (0.05–0.09° against ~2.5°). A larger cell packs
-  reflections closer in TOF, so it needs the finer axis to separate them.
+| | wavelengths | 2θ max | geometric d_min | predicted | observed |
+|---|---|---|---|---|---|
+| NMX config1, 50 bins | 1.87–3.54 Å | 134.0° | **1.016 Å** | 93 304 | 1359 |
+| MANDI CuZnSOD, 50 bins | 1.92–4.08 Å | 139.3° | **1.027 Å** | 82 630 | ~230 |
 
-So: `input.tof_bins` (or a pre-binned file per stage) with
-`indexing.tof_bins` / `integration.tof_bins` overridable independently, default
-"index coarse, integrate fine", and a documented note that a layout failing at one
-binning is worth retrying at the other before being written off. The mechanism —
-finer binning resolves more genuine reflections while quartering counts per frame
-admits proportionally more marginal ones, and the basis-vector search needs a peak
-above the noise floor rather than more reflections — is a hypothesis consistent with
-all 22 datasets, not a measurement.
+- **Both passes always run** under `calculated`: the observed pass chooses the
+  method and mask at a hundredth of the cost of comparing them over 93 000
+  shoeboxes, and its output stays on disk as a checkpoint.
+- **Cost guard `max_predicted`** (250 000), counted with `TOFReflectionPredictor`
+  before any shoebox is extracted, and a run over it stops with the d_min that
+  would bring it under. Found by prediction, not from `d^-3`: a Laue-TOF experiment
+  does not record a sphere, so the analytic estimate is optimistic (2.69 Å against
+  a true 3.31 Å).
+- **The wavelength band bounds the calculated pass only.** An observed reflection is
+  inside it by construction; a predicted one outside it would be integrated as
+  noise. This is what protects MANDI, whose stated band is not its measured one.
+- **Profile fitting a calculated pass is not worth it on MANDI**: `profile_1d_ibix`
+  fits 98.9–100 % of observed spots but 55–61 % of everything predicted, so the file
+  mixes two populations (42 887 observations with no profile value) and summation
+  wins on every statistic. `min_profile_fraction` does not catch it — 58 % passes.
+  Use `method=summation` for calculated passes until the 1D profile parameters are
+  tuned.
+- Cut afterwards on CC½ in lawless. Re-merging costs nothing; re-integrating costs
+  everything.
 
-## Wavelength normalisation and scaling (POINTLESS → LAWLESS)
+## Integration choices
 
-Reference documentation: `/Users/aaronfinke/aimless/lawless.md` (program write-up)
-and `/Users/aaronfinke/aimless/CLAUDE.md` (implementation notes, MTZ-input
-pitfalls). Test invocation pattern: `/Users/aaronfinke/aimless/test_data/run_aimless.sh`.
+- `dials.tof_integrate` always writes `intensity.sum.*`; a profile method adds
+  `intensity.prf.*` beside it. So "fall back to summation" is only for an outright
+  failure, and both intensities reach the MTZ (`I`/`SIGI` and `IPR`/`SIGIPR`), a
+  failed fit getting the missing-number flag, never a zero.
+- `profile_1d_ibix` used to abort the run on small intensities
+  (`DIALS_ASSERT(A >= min_bounds[0] …)`: `A` is fixed at 1.0 in normalised units
+  while `max_bounds[0]` is `1e4 · intensity_max` in raw units, so the data's *scale*
+  decided). **Fixed by [#3281](https://github.com/dials/dials/pull/3281)**, which
+  bounds `A` by phil and corrects an inverted FWHM guard — that second half lifted
+  the fit fraction on config3 from 11 % to 62 %. The fix is in `dials-dev` only.
+- A profile run finishing is not the method working: `profile_3d_gutmann` completed
+  having fitted 13 of 1359 reflections. Hence `min_profile_fraction` (0.5), below
+  which summation is used.
+- **The two masks give different data, not different metrics of it** (summation, one
+  NMX orientation): `ellipse` 7.0 s wall, mean I/σ 36.5, 71.6 foreground px;
+  `seed_skewness` 26.5 s, 59.6, 322.2 px. CC between the intensities 0.95. Higher
+  I/σ is not proof of better, so `mask=both` integrates each way and keeps the
+  winner by `mask_metric`, and the run is integrated in one call so every batch is
+  treated alike.
+- `dials.export format=shelx` refuses its own `intensity=auto` when both columns are
+  present, so the export step always passes an explicit `intensity=`.
 
-### Why these two programs
+## Lorentz: exactly once
 
-`dials.tof_integrate` normalises each run by the measured incident spectrum, but
-that leaves per-orientation scale, relative B, absorption/secondary-beam effects
-and any **residual wavelength dependence** of the effective spectrum and detector
-efficiency. Lawless fits exactly those: it is aimless plus a **wavelength
-normalisation term `w(λ)`** in the scale model, fitted either as a Chebyshev
-polynomial in `ln f(λ)` or as a Gaussian process, plus a `PROBE NEUTRON` switch
-that sets neutron-appropriate defaults. Pointless is required first because
-lawless needs the reflections **sorted and on a consistent, symmetry-assigned
-setting**.
+`corrections.lorentz=True` is hard-coded and the phil option is gone. The lawless
+branch in use has no `LORENTZ` keyword and aborts if given one, so integration is
+the only place the factor can be taken.
 
-### Step 7 (new): combined integrated data → unmerged Laue MTZ
+Measured on MANDI CuZnSOD. `L = sin²θ/λ⁴`, and the halves differ:
 
-New module `src/xia2/Modules/LaueTOF/laue_tof_mtz.py`, writing with `gemmi` (already a
-DIALS dependency; `export_mtz.py` uses it). Input: the combined
-`integrated.{expt,refl}` from the combine step. Output: `unmerged.mtz`.
+- `λ⁴` is **degenerate with the wavelength normalisation** — lawless says so in
+  `mtz_unmerge_io.cpp` — so it makes no difference whether it is applied or absorbed
+  by `w(λ)`. The MaNDi reduction leaves it in deliberately, which is why its
+  normalisation curve rises where ours falls.
+- `sin²θ` is **not** degenerate: it sets relative scale between resolution shells,
+  and nothing downstream supplies it. Applying it wins 12 of 20 shells and the outer
+  shell (CC½ 0.500 against 0.457). Overall CC½ looks worse (0.786 against 0.927)
+  purely because the correction re-weights the shells.
 
-Requirements, each of which has been observed to fail silently (from
-`aimless/CLAUDE.md`, "What the input MTZ must contain"):
+Consequence: intensities land ~1e-3 of counts, which makes **pointless fail
+outright** (`NormaliseInRuns::apply Unused run 1`). The MTZ writer therefore scales
+`I`/`SIGI` and `IPR`/`SIGIPR` by a power of ten to a counts-like median and logs the
+factor — a constant on both columns is absorbed by the scale factors and changes no
+statistic.
+
+## Scaling tail (POINTLESS → LAWLESS)
+
+Reference: `~/aimless/lawless.md`, `~/aimless/CLAUDE.md`.
+
+`dials.tof_integrate` normalises by the measured incident spectrum, which leaves
+per-orientation scale, relative B, absorption and any **residual wavelength
+dependence**. Lawless fits those: aimless plus a wavelength normalisation `w(λ)`,
+as a Chebyshev polynomial or a Gaussian process, with `PROBE NEUTRON` defaults.
+Pointless comes first because lawless needs reflections sorted and on a consistent
+setting.
+
+### The unmerged MTZ
+
+Written with gemmi by `laue_tof_mtz.py`. Every requirement below has been observed
+to fail **silently**, so `validate_unmerged_mtz` re-reads the file and fails loudly
+on each.
 
 | item | requirement | failure if wrong |
 |---|---|---|
-| `LAMBDA` column | per-observation wavelength in Å from `wavelength_cal`; label `LAMBDA` (lawless accepts `LAMBDA`/`LAM`/`WAVELENGTH`, case-insensitive, first in that order wins) | lawless stops when `LAUE` is given |
-| `M/ISYM` | must be present and **written as 1 throughout** for unreduced indices | pointless reads the file as *merged*, collapses observations and silently drops extra columns |
-| batch records | one per orientation, with `LDTYPE = 3` (Laue), a cell, non-zero `PHIRANGE`, `BSCALE = 1`, and `UMAT` = the refined crystal orientation | no batch records ⇒ pointless reports one batch regardless of the `BATCH` column; missing `UMAT` ⇒ `SCALES SECONDARY`/`ABSORPTION` refines flat **with no warning** |
-| datasets | `HKL_base` as dataset 0 (H,K,L,M/ISYM,BATCH), data in dataset ≥ 1, batch `LBSETID` pointing at the data set | pointless dies with `Dataset::pxdname, setid not found` |
-| `ROT` column | per-batch φ; optional | absent ⇒ lawless warns and substitutes the batch number (harmless for stationary exposures) |
-| `BATCH` column | one batch number per orientation, matching `imageset_id`/`id` as used by the SHELX export | mis-scaled or merged-across-settings data |
-| `ALAMBD`/`DELAMB` in batch header | band centre and half-width from the per-batch λ range | cosmetic/diagnostic |
+| `LAMBDA` | per-observation wavelength from `wavelength_cal` | lawless stops when `LAUE` is given |
+| `M/ISYM` | present and **1 throughout** | pointless reads the file as merged, collapses observations, drops columns |
+| batch records | one per exposure, `LDTYPE = 3`, a cell, non-zero `PHIRANGE`, `BSCALE = 1`, `UMAT` = refined orientation | no records ⇒ pointless reports one batch regardless of `BATCH`; no `UMAT` ⇒ `SECONDARY`/`ABSORPTION` refines flat with no warning |
+| datasets | `HKL_base` as dataset 0, data in ≥ 1, batch `LBSETID` pointing at the data set | `Dataset::pxdname, setid not found` |
+| `BATCH` | one per exposure, **1-based** (SHELX batches are 0-based) | mis-scaled or merged-across-settings data |
+| `ROT` | per-batch φ, optional | lawless substitutes the batch number; harmless for stationary exposures |
 
-Also write `I`, `SIGI` (summation or profile intensities as integrated), and
-`XDET`/`YDET` where available. Do not write `SCALEUSED` — nothing has scaled the
-data yet.
+Batch word offsets (`I_LDTYPE=14`, `F_UMAT=6`, `F_PHISTT=36`, `F_PHIRANGE=47`,
+`F_BSCALE=43`, `F_ALAMBD=86`, `F_DELAMB=87`) are copied from
+`~/LADI_files/TIM_2020/aaron/addbatches.py`, not re-derived.
 
-Working reference implementations of exactly this header-writing (gemmi, MTZ batch
-word offsets already worked out): `/Users/aaronfinke/LADI_files/TIM_2020/aaron/addbatches.py`
-(laue-dials → pointless) and `mtz1tomtz.py` (LAUEGEN `.mtz1`), plus
-`/Volumes/Finke_NMX/Mandi/CuZnSOD/aaron/lauenorm2mtz.py`. Copy the offset table
-(`I_LDTYPE=14`, `F_UMAT=6`, `F_PHISTT=36`, `F_PHIRANGE=47`, `F_BSCALE=43`,
-`F_ALAMBD=86`, `F_DELAMB=87`, …) rather than re-deriving it.
-
-### Step 8 (new): POINTLESS — sort and set symmetry
+### Pointless
 
 ```
 pointless HKLIN unmerged.mtz HKLOUT sorted.mtz XMLOUT pointless.xml <<EOF
@@ -872,21 +343,16 @@ CHOOSE SPACEGROUP P 65 2 2
 EOF
 ```
 
-- **Give the symmetry explicitly.** Pointless cannot reliably determine the Laue
-  group from *unnormalised* Laue data: the wavelength dependence inflates the
-  disagreement between symmetry mates, so even the identity operation scores badly
-  and the ranking is unreliable (`lawless.md`, "A note on POINTLESS"). Default
-  `lauegroup`/`space_group` in xia2 to what the user gave to `dials.index` (or to
-  the `refine_bravais_settings` recommendation), and let both be overridden.
-- **Version matters**: use the local **1.16.1** build (`/Users/aaronfinke/pointless/pointless`).
-  1.13.6 (CCP4 9) does not pass the wavelength column through. 1.16.1 prints
-  *"Additional unrecognised columns passed unchanged to output file"* — assert this
-  in the log, or verify `LAMBDA` is present in `sorted.mtz` before calling lawless,
-  and fail with a clear message naming the version requirement.
-- `COPY` is available if only sorting/reindexing to a given setting is wanted
-  (`keywords.cpp:1125`); expose it as `pointless.mode = choose | copy`.
+- **Always give the symmetry.** Pointless cannot determine the Laue group from
+  unnormalised Laue data: the wavelength dependence inflates disagreement between
+  mates, so even the identity scores badly. Treat any suggestion as informational;
+  never let it silently reindex.
+- **Chosen by version, not by path.** CCP4 9 ships 1.13.6, which drops the
+  wavelength column; the local build is 1.16.1. Every candidate on `$PATH` and in
+  `$CCP4/bin` is asked its version, the first newer than 1.13.6 wins, and the
+  wavelength column is checked afterwards as a backstop.
 
-### Step 9 (new): LAWLESS — wavelength normalisation, scaling, merging
+### Lawless
 
 ```
 lawless HKLIN sorted.mtz HKLOUT scaled.mtz XMLOUT lawless.xml <<EOF
@@ -900,617 +366,128 @@ REJECT 4
 OUTPUT MERGED UNMERGED
 EOF
 ```
-(the recommended starting point for a neutron TOF dataset, from `lawless.md`
-"Workflow for Laue data"). Defaults xia2 should set and log:
 
-- `PROBE NEUTRON` — switches off automatic `ANOMALOUS`, zeroes the polarisation
-  factor, makes `SCALES BATCH` the default primary mode (stationary exposures, so φ
-  is not a scaling variable), rewords radiation-damage output and reports
-  rejections against 2θ. Every change is printed by the program.
-- `LAUE NORMGPR lam_min lam_max` — GP normalisation is the better default: it
-  follows structure a low-order polynomial cannot and is **fixed after its
-  pre-pass**, so it cannot trade against the other scale terms. `NORMCHEBYSHEV
-  <degree> <lam_min> <lam_max>` is the alternative (refined jointly; up to 5
-  non-overlapping ranges). They are **mutually exclusive — giving both is fatal**.
-  Derive the default `lam_min`/`lam_max` from the `wavelength_cal` range of the
-  combined data (or pass ≤ 0 to let lawless take them from the data) and
-  `NORMLAMREF` from the intensity-weighted centre of the band.
-- `NORMGPRBINS` (default 50), `NORMGPRLENGTH`, `NORMGPRMATERN` exposed as
-  overrides. `NORMGPRPERRUN` is experimental — exposed but off.
-- `SDCORRECTION ... SDLAMBDA [<scale>]` exposed for the case where χ² trends with
-  wavelength; the exponent is fitted, not given, and is self-limiting.
-- `LAMBDAONLY` exposed as a diagnostic mode (wavelength term only, no primary/B/
-  secondary scales, no outlier rejection) — useful for isolating `w(λ)`.
+- `PROBE NEUTRON` switches off automatic `ANOMALOUS`, zeroes polarisation, makes
+  `SCALES BATCH` the default (φ is not a scaling variable here) and reports
+  rejections against 2θ.
+- `NORMGPR` is the better default: it follows structure a low-order polynomial
+  cannot and is **fixed after its pre-pass**, so it cannot trade against the other
+  scale terms. `NORMCHEBYSHEV` is refined jointly. They are **mutually exclusive —
+  giving both is fatal**. Band limits come from the `wavelength_cal` range.
+- **Both programs need absolute HKLIN paths.** Lawless writes its outputs into its
+  working directory, so it gets one of its own, and a relative HKLIN then resolves
+  against the wrong place — reported, misleadingly, as *"LAUE requires a wavelength
+  for every observation"*. A `Cannot open file` is now caught directly.
+- **Lawless 0.0.1 writes invalid XML**: it opens `<LAWLESS>` and closes
+  `</AIMLESS>`, left from the rename, so strict parsers refuse it. The reader
+  repairs that one mismatch. Worth fixing in lawless.
+- Statistics live in `Result/Dataset/<name>/{Overall,Inner,Outer}`, and the fitted
+  curve in `WavelengthNormalisationGPR` or `…Chebyshev`.
+- Outputs registered: `scaled.mtz`, the unmerged output, `lawless.xml`, the log, and
+  **`LAMBDANORM`** — a self-contained gnuplot script of `w(λ)` (GP carries a 1σ
+  band, Chebyshev does not).
+- **One batch per exposure** means few parameters per batch, so with a handful of
+  settings `SCALES BATCH BFACTOR ON SECONDARY 0` may be over-parameterised. Keep
+  `scaling.lawless.scales` overridable and report the parameter/observation ratio.
 
-Outputs to register with `FileHandler`: `scaled.mtz` (merged) and the unmerged
-output (which now carries a `LAMBDA` column), `lawless.xml`, the log, and
-**`LAMBDANORM`** — a self-contained gnuplot script of the fitted `w(λ)` curve
-(`gnuplot -p LAMBDANORM`; GP fit carries a 1σ band, Chebyshev does not). Parse the
-normalisation table and the merging statistics out of the XML for the xia2 summary
-and report.
+## The report
 
-Optional final SHELX file from the merged MTZ via the existing
-`src/xia2/Wrappers/CCP4/Mtz2various.py` wrapper (HKLF4), alongside the unscaled
-HKLF2 checkpoint written by `dials.export format=shelx`.
+`laue_tof_report.py` produces `xia2.laue_tof-report.{html,json}` — xia2's own report
+page with one panel added, not a new kind of report. Built from
+`Report.from_unmerged_mtz` on lawless's `scaled_unmerged.mtz` and rendered in
+process, so a Laue user gets the tables and plots they already know.
 
-### Lorentz: exactly once
+The added panel holds what the standard page cannot know: the fitted `w(λ)` with its
+1σ band and the binned observations behind it, read from `LAMBDANORM`'s inline
+blocks; each exposure's wavelength band from `ALAMBD`/`DELAMB`; profile against
+summation intensities from the **unscaled** MTZ, the only file carrying both; and
+what lawless fitted, from the XML.
 
-**DIALS records nothing about it.** `corrections.lorentz=True` multiplies `I`,
-`B` and their variances by `L = sin²θ/λ⁴` inside the C++ integrator
-(`tof_integration.h`) and writes no column and no flag; the only trace is
-*"Adding Lorentz correction"* in `tof_integrate.log`. An `integrated.refl` from
-someone else therefore cannot be asked whether it is corrected. xia2 adds a
-`lorentz_applied` boolean column at the integrate step so the answer travels
-with the data through combine and into the MTZ, and refuses to combine
-orientations that disagree.
+`templates/report.html` gained an empty `{% block extra_panels %}` for this — one
+line upstream, no duplicated template, reusable by any pipeline. A failure writing
+the report does not fail the run.
 
+## TOF binning (removed, to be re-added)
 
-`dials.tof_integrate corrections.lorentz` defaults to **False** in DIALS, and the
-`lawless` branch now in use has **no `LORENTZ` keyword at all** - passing one aborts
-it (exit 134). So there is exactly one place the factor can be taken, and
-**xia2.laue_tof always takes it**: `corrections.lorentz=True` is hard-coded in the
-integrate step and the `integration.lorentz` phil option was removed on 2026-09-22.
-The `lorentz_applied` column is still stamped on every integrated file, and the
-combine, export and scale steps still check it, for data this pipeline did not
-produce.
+`dials.import` needs a TOF-binned file; raw event data must be reduced first, by
+**essnmx** (`~/ess/packages/essnmx`). The in-pipeline `bin` step was removed on
+2026-09-23 because it tangled binning with reading and the MANDI route mutates the
+user's raw files. The pipeline now only checks that dxtbx can read each input and
+names any file it cannot. Old code is in the history.
 
-**Why here and not downstream (measured on MANDI CuZnSOD, 2026-09-22).** The
-factor is `sin^2(theta)/lambda^4`, and the two halves behave differently:
+```
+essnmx-reduce   --input-file raw.h5             --nbins 50 --output-file binned50.h5
+essmandi-reduce --input-file mandi_event.nxs.h5 --nbins 50 --output-file binned50.h5
+```
 
-- The `lambda^4` half is **degenerate with the wavelength normalisation** - lawless
-  says so itself in `mtz_unmerge_io.cpp` - so it makes no difference whether it is
-  applied or absorbed by `w(lambda)`. The MaNDi reduction leaves it in deliberately
-  (`mandi_createmtz.py:307` applies `1000*sin^2(theta)` only), which is why its
-  normalisation curve *rises* with wavelength where ours *falls*: the two are
-  complements, not rivals, and differ by `lambda^-5.25` on this data.
-- The `sin^2(theta)` half is **not** degenerate. It sets relative scale between
-  resolution shells, and nothing downstream supplies it.
+When re-added it must not classify input on the pipeline's behalf. Note
+`ess/nmx/nexus.py::_set_default_instrument` writes `entry/instrument/name = "NMX"`
+unconditionally, so a MANDI reduction is claimed by `FormatESSNMX`, whose
+`get_detector` then raises `KeyError: 2` — fix that in essnmx first.
 
-Per shell, applying it wins 12 of 20 shells and the outer shell (CC-half 0.500
-against 0.457). The *overall* CC-half looks worse (0.786 against 0.927) purely
-because the correction re-weights the shells and overall CC-half is computed
-across the whole dataset - a statistic artefact, not a loss.
+MANDI is histogrammed in place by dxtbx (bin edges and counts written into the event
+file, events kept). Two dxtbx problems worth fixing:
+`generate_histogram_data_for_panel` builds a pool task per pixel, ~1 min per panel
+and ~40 min for a 40-panel run, where the same histogram is a few seconds of
+`np.bincount`; and `get_time_range_for_panel` returns
+`event_time_zero + event_time_offset`, which for a 23 h run gives 14700–113000 µs
+where every event arrives between 14739 and 31407.
 
-Two consequences of always applying it, both handled:
-
-- **Intensities land ~1e-3 of counts** (median 3.3e-4 on MANDI against 7.5e-2
-  without). `method=profile_1d_ibix` used to abort on that; #3281 fixed it. What
-  remains is **pointless failing outright** on numbers that small
-  (`NormaliseInRuns::apply Unused run 1`).
-- The unmerged-MTZ writer therefore scales `I`/`SIGI` (and `IPR`/`SIGIPR`) by a
-  power of ten to a counts-like median, logging the factor. A constant on both
-  columns is absorbed by the scale factors and changes no statistic; it is the
-  same guard as the `1000 *` in the MaNDi script.
-
-## The output report
-
-**Written 2026-09-21** as `laue_tof_report.py` and the `report` workflow step,
-producing `xia2.laue_tof-report.html` and `-report.json` in the run directory.
-It is xia2's own report page with one panel added, not a new kind of report: `xia2.Modules.Report.Report` +
-`src/xia2/templates/report.html`, driven as `xia2.cli.report` drives it -
-`Report.from_unmerged_mtz(mtz, params, report_dir)`, then
-`resolution_plots_and_stats()`, `batch_dependent_plots()`,
-`intensity_stats_plots()`, `multiplicity_plots()`, rendered with jinja2 into
-`<prefix>-report.html` and `<prefix>-report.json`. That is the format
-`xia2.report`, multiplex and `xia2.html` all produce, so a Laue user gets the
-tables and plots they already know: CC½ and I/sigma against resolution,
-completeness, multiplicity, Rmerge against batch, second moments, the L test,
-Wilson plot and the multiplicity images.
-
-How it works out:
-
-- **Input** is lawless's `scaled_unmerged.mtz`, which `Report.from_unmerged_mtz`
-  reads unchanged: it has `BATCH`, `I`/`SIGI` and `SCALEUSED` (already applied -
-  nothing may apply it again). One batch per orientation makes the batch plots a
-  per-setting summary. Verified on the NMX pair: 11 overall rows, 21 merging
-  rows, and the cc_one_half / i_over_sig_i / completeness /
-  multiplicity_vs_resolution / r_pim plots all come back.
-- **Called in process**, as `xia2.cli.report.run` does, so the page lands in the
-  run directory and is registered with `FileHandler.record_html_file`.
-- **The Laue panel** ("Laue wavelength normalisation", open by default) holds
-  what the standard page cannot know: the fitted `w(lambda)` curve with its
-  1-sigma band and the binned observations it was fitted to, read from lawless's
-  `LAMBDANORM` (a gnuplot script whose numbers sit in `$LAMBDANORM` and
-  `$LAMBDABINS` inline blocks); the wavelength band each orientation
-  contributed, from `ALAMBD`/`DELAMB` in the MTZ batch headers; profile-fitted
-  against summation intensities, taken from the **unscaled** `unmerged.mtz`,
-  since that is the only file carrying both; and a table of what lawless fitted,
-  from the XML.
-- **The template hook**: `src/xia2/templates/report.html` gained an empty
-  `{% block extra_panels %}`, and `laue_tof_report.html` extends it to fill that
-  block. One line upstream, no duplicated template, and any other pipeline can
-  use the same hook.
-- A failure writing the report is reported and does not fail the run: everything
-  it describes is already on disk.
-
-## Resolution: observed, then calculated
-
-`integration_type=observed` integrates only the spots that were found and
-indexed, which on MANDI is a couple of hundred reflections of the tens of
-thousands the geometry can reach. `integration_type=calculated` integrates every
-predicted reflection out to `calculated.dmin`, and the question is what that
-should be. **Design (user, 2026-09-21: multi-step, starting from the absolute
-d_min of the detector geometry):**
-
-1. **Pass 1, `observed`** as now: index, refine, integrate the found spots. This
-   is what fixes the geometry, and it is cheap.
-2. **Work out where to stop.** The hard floor is geometric -
-   `d = lambda / (2 sin theta)` at the shortest wavelength and the largest
-   scattering angle any pixel sees - and nothing beyond it can have been
-   recorded. `geometric_d_min` computes it and the import step logs it
-   (**implemented 2026-09-21**):
-
-   | | wavelengths | 2theta max | geometric d_min | predicted reflections | observed integrated |
-   |---|---|---|---|---|---|
-   | NMX config1, 50 bins | 1.87-3.54 Å | 134.0° | **1.016 Å** | 93 304 | 1 359 |
-   | MANDI CuZnSOD, 50 bins | 1.92-4.08 Å | 139.3° | **1.027 Å** | 82 630 | ~230 |
-
-   The wavelength range comes from the scan's `time_of_flight` and the flight
-   path, not from `beam.get_wavelength_range()`: FormatESSNMX derives that (and
-   the two agree to three decimals) but **FormatMANDI hard-codes 2.0-4.0 Å**
-   where the histogram gives 1.92-4.08, which alone moves MANDI's limit from
-   1.066 to 1.027 Å. Prediction is cheap - `TOFReflectionPredictor` gives those
-   counts in 1.6 s - so the number can be reported before committing to a pass.
-3. **Pass 2, `calculated`** to that d_min, so that everything measurable is
-   measured. Two to three orders of magnitude more reflections than pass 1, most
-   of them weak, which is the point: the cutoff is a merging decision, not an
-   integration one.
-4. **Cut afterwards on CC½** from lawless, applied at merging. Re-running lawless
-   with `RESOLUTION` costs nothing, where re-integrating costs everything, so the
-   pipeline integrates wide once and cuts as often as it likes.
-
-**Written 2026-09-22.** The open points were settled as follows:
-
-- **Phil shape: folded into `integration_type`.** No second switch. With
-  `integration_type=calculated` the limit is `integration.calculated_d_min` when
-  given and the geometric limit when not, so the common case needs one word.
-  `calculated_d_min` is no longer required (it used to be an error to leave it
-  unset), and a non-positive value is rejected up front.
-- **Both passes always run.** `integration_type=calculated` runs the observed
-  pass first, because that is what chooses the method and the mask - a mask
-  comparison over 93 000 predicted shoeboxes costs a hundred times what it does
-  over 1 359 - and then the calculated pass with those choices. The observed
-  output stays on disk under its own `integrated_<method>_<mask>.refl` name as a
-  checkpoint, and the log names it; the calculated output becomes
-  `integrated.refl`.
-- **The method the calculated pass ends on is the one the other orientations
-  use.** A profile method that survives the observed pass can still fail here,
-  where most shoeboxes hold no peak, so the fallback is taken once and
-  remembered rather than rediscovered on every orientation. Before #3281 this
-  fired on every calculated pass; it is now a guard against the mask and
-  thread-pool failures that remain.
-- **Profile fitting a calculated pass is not worth it on MANDI** (2026-09-22,
-  #3281 build). `profile_1d_ibix` fits 98.9-100 % of the observed spots but only
-  55-61 % of everything predicted, and lawless's own comparison then puts pure
-  profile at Rmeas 0.394 against summation's 0.311, choosing a combination that
-  beats summation by 0.001. End to end the summation run is better on every
-  statistic (Rmerge 0.291 vs 0.313, CC½ 0.786 vs 0.774, outer 0.500 vs 0.485).
-  lawless says why: 42 887 of the observations have no profile value, so the file
-  mixes two populations. `min_profile_fraction` does not catch this — 58 % passes
-  it. Use `method=summation` for calculated passes until the 1D profile
-  parameters have been tuned.
-- **Cost guard `integration.max_predicted` (default 250 000).** The count is
-  predicted with `TOFReflectionPredictor` before any shoebox is extracted - 1.7 s
-  for 93 000 - logged with the observed count beside it, and a run over the guard
-  stops with the d_min that would bring it under. That number is *found by
-  prediction*, not from `d^-3`: a Laue-TOF experiment does not record a sphere,
-  so the analytic estimate is optimistic (2.69 A against the true 3.31 A on
-  config1 for a 5 000 guard) and would have the user refused twice.
-- **The wavelength band defaults to the TOF-derived one** for the calculated pass
-  only. An observed reflection is inside the band by construction, having been
-  found in the data, so the observed pass is left exactly as it was; a predicted
-  one outside it cannot have been recorded and would be integrated as noise.
-  This is what protects MANDI, whose stated band (2.0-4.0 A) is not its measured
-  one (1.92-4.08 A).
-
-Verified on NMX config1: `calculated_d_min=2.5` predicts 9 970 reflections
-against the 1 359 observed and integrates 5 094 of them (the rest dropped as
-overlapping or out of range), 50 s for the run; at N=2 the second orientation
-goes straight to summation and combine gives 10 217 reflections in 2 batches.
-The default limit is 1.014 A here (1.016 A from the imported geometry, 1.014 A
-from the refined one) for 93 312 predicted, 69x the observed count. The observed
-path is unchanged: still 1 359 reflections.
-
-## Files to add / modify
-
-Follow the modern `xia2.ssx` pattern (functional/CLI orchestration that bypasses
-the legacy `Schema/XWavelength` monochromatic model). Multiple exposures ⇒ loop the
-per-exposure steps over the N orientations (lighter than SSX batching — each
-orientation is one experiment, not thousands of stills).
-
-1. **`src/xia2/cli/laue_tof.py`** (new) — entry point, mirror `src/xia2/cli/ssx.py`:
-   `ArgumentParser(phil=phil_scope, read_experiments=False, read_reflections=False,
-   check_format=False)`, `setup_logging(logfile="xia2.laue_tof.log", …)`, clear the
-   dials logger handler, `cleanup(cwd)` context, then call
-   `run_xia2_laue_tof(cwd, params)`. Citations (add LSCALE/Arzt 1999 and the
-   aimless/pointless references used by lawless) + `write_citations`.
-
-2. **`src/xia2/Modules/LaueTOF/__init__.py`** (new).
-
-3. **`src/xia2/Modules/LaueTOF/xia2_laue_tof.py`** (new) — the PHIL scope
-   (`full_phil_str`) and `run_xia2_laue_tof(cwd, params)` orchestrator. PHIL groups:
-   ```
-   input   { image=/template=/directory=  (repeatable → one entry per exposure)
-             vanadium_run=None  empty_run=None }
-   binning { … }                  # see Step 0; Auto = bin only un-binned input
-   spotfinding { min_spot_size=15          # not the ToF auto-default of 6
-                 threshold_algorithm = *dispersion_extended radial_profile dispersion
-                 phil=None }
-   indexing { unit_cell=None space_group=None min_spots=None
-              method=None                  # None = walk the retry ladder
-              ladder = fft3d real_space_grid_search fft1d   # ordered, retried in turn
-              max_cell=None                # None -> 1.3 x longest cell edge, not Auto
-              d_min_start=4.0
-              outlier { algorithm=mcd  iqr_multiplier=0.8  separate_panels=True }
-              seed_from_first=True         # seed later orientations from the first
-                                           # success (primitive-setting A matrix)
-              max_strong=35000             # guard the ToF predictor assert
-              strategy=None                # drop-in index.phil, wins over all above
-              phil=None }
-   bravais_settings { enabled=True phil=None }
-   integration { method=profile_1d_ibix   # summation is written whatever is set
-                 fallback_method=summation  # profile fitting can abort the run
-                 min_profile_fraction=0.5   # or fit almost nothing and "succeed"
-                 integration_type=observed
-                 background_model=linear3d
-                 mask=both                  # ellipse | seed_skewness | both
-                 mask_metric=i_over_sigma   # how both is decided
-                 lorentz=True
-                 bbox_tof_padding= bbox_xy_padding= wavelength_range=
-                 absorption{…} phil=None }
-   absorption { … passthrough / corrections.absorption overrides (default off) }
-   lorentz { applied_by = *integrate lawless none }
-   scaling {
-     enabled = True
-     pointless {
-       executable = None          # default: $CCP4/bin/pointless, else PATH;
-                                  # user points this at /Users/aaronfinke/pointless/pointless
-       mode = *choose copy
-       lauegroup = None           # default from indexing.space_group / bravais result
-       space_group = None
-       keywords = None            # extra raw keyword lines appended
-     }
-     lawless {
-       executable = None          # default: PATH 'lawless', then ~/aimless/build/aimless
-       probe = *neutron xray
-       normalisation = *gpr chebyshev none
-       lam_min = None  lam_max = None  lam_ref = None   # default from wavelength_cal
-       chebyshev_degree = 6
-       gpr { bins = 50  length = None  matern = False  per_run = False }
-       scales = "BATCH BFACTOR ON SECONDARY 0"
-       sdcorrection = "NOREFINE 1.0 0.0 0.0"
-       sdlambda = None
-       reject = 4
-       resolution = None
-       lambda_only = False        # LAMBDAONLY diagnostic mode
-       keywords = None            # extra raw keyword lines appended
-     }
-   }
-   output  { shelx=True mtz=True intensity=auto composition=CH }
-   workflow.steps = find_spots+index+bravais+refine+integrate+combine+export+
-                    unmerged_mtz+pointless+lawless
-   nproc=<auto>
-   ```
-   Orchestrator loops the per-exposure steps below over each orientation (in a
-   per-exposure subdirectory), then runs a single combine + export + the scaling
-   tail in a `scale/` subdirectory. Decorated with `@report_timing` (reuse
-   `xia2.Modules.SSX.util.report_timing`).
-
-4. **`src/xia2/Modules/LaueTOF/laue_tof_programs.py`** (new) — one function per
-   step, run **per exposure** (loop over the N orientations). **Recommended: drive
-   the validated DIALS CLI via `subprocess.run`** (exactly the pattern of
-   `xia2.Modules.SSX.data_integration_standard.run_import`), which guarantees the
-   TOF code paths are taken and is trivial to verify against the known-good recipe.
-   Per-exposure steps:
-   - `classify_input` → h5py probe of the NeXus entry: `nxlauetof` (ready) |
-     `tofraw` | `nxsnsevent` | `unknown`. See
-     [Step 0](#step-0-new-tof-binning-with-essnmx).
-   - `bin_run` (only when the input is not `nxlauetof`, or when two binnings are
-     requested) → `essnmx-reduce` (NMX) / `essmandi-reduce` (MANDI) with
-     `--nbins`, writing the coarse (index) and fine (integrate) reductions
-   - `import_run` → `dials.import <image> output.experiments=imported.expt`
-   - `find_spots` → `dials.find_spots imported.expt`
-   - `index` → `dials.index imported.expt strong.refl [unit_cell=][space_group=]
-     [indexing.method=] [max_cell=] [refinement_protocol.d_min_start=]
-     [refinement.reflections.outlier.*]`, driven by the retry ladder and acceptance
-     test of [Indexing defaults](#indexing-defaults-from-the-nmx-study). After the
-     first success, later exposures are seeded with that crystal's **primitive-setting**
-     A matrix (`change_of_basis_op_to_primitive_setting` in the caller). Log every
-     attempt with its method, indexed count, indexed fraction and RMSD
-   - `refine_bravais_settings` (if `bravais_settings.enabled`) →
-     `dials.refine_bravais_settings indexed.expt indexed.refl`, then parse
-     `bravais_summary.json` and log the scoring table (reuse the parsing approach
-     from the existing `RefineBravaisSettings` wrapper). Informational for a known
-     space group; report table + recommended setting.
-   - `refine` → `dials.refine indexed.expt indexed.refl` → `refined.{expt,refl}`
-   - `tof_integrate` → `dials.tof_integrate refined.expt refined.refl
-     [corrections.incident_run=<vanadium>] [corrections.empty_run=<empty>]
-     [corrections.lorentz=True] method= background_model=` → `integrated.{expt,refl}`
-   Then, across all orientations:
-   - `combine` — concatenate the per-exposure `integrated.{expt,refl}` (experiments
-     + reflection tables, assigning unique identifiers/batches per orientation —
-     reuse `assign_unique_identifiers` / reflection-table concat as in
-     multiplex/SSX). Resolve indexing consistency across orientations first
-     (see Risks).
-   - `export` → `dials.export format=shelx <combined>` (multi-batch HKLF2 with
-     wavelengths). **Not** `format=mtz` — refused for TOF.
-   - `write_unmerged_mtz` → `laue_tof_mtz.py` (below) → `unmerged.mtz`.
-   - `run_pointless` → `pointless HKLIN unmerged.mtz HKLOUT sorted.mtz XMLOUT
-     pointless.xml`, keywords on stdin (`subprocess.run(..., input=keywords)`),
-     `LAUEGROUP`/`CHOOSE SPACEGROUP` always written explicitly. Verify afterwards
-     that `sorted.mtz` still has the wavelength column; if not, fail with the
-     "needs pointless > 1.13.6" message.
-   - `run_lawless` → `lawless HKLIN sorted.mtz HKLOUT scaled.mtz XMLOUT lawless.xml`,
-     keywords on stdin, built from the `scaling.lawless` PHIL. Parse `lawless.xml`
-     for merging statistics and the `<WavelengthNormalisation>` block; register
-     `scaled.mtz`, the unmerged output, `LAMBDANORM`, `ROGUES`, the log and the XML
-     with `FileHandler`.
-   Each function raises a clear `ValueError` on non-zero return / stderr, records
-   outputs via `xia2.Handlers.Files.FileHandler`, and per-step user phil files are
-   merged as `dials.<prog> <user.phil> …` (SSX precedence pattern). For the two
-   CCP4 programs the equivalent escape hatch is `scaling.<prog>.keywords`, appended
-   after the generated keyword lines so the user always wins.
-
-5. **`src/xia2/Modules/LaueTOF/laue_tof_mtz.py`** (new) — the combined-integrated →
-   unmerged Laue MTZ converter described in Step 7, plus a small
-   `check_wavelength_column(mtz_path)` helper used to validate pointless output.
-   Keep it importable and unit-testable on its own; it is the piece most likely to
-   need instrument-specific tweaks.
-
-6. **`setup.py`** — add console script:
-   `"xia2.laue_tof=xia2.cli.laue_tof:run"` in `console_scripts`.
-
-7. **`tests/regression/test_laue_tof.py`** (new) — `dials_data("isis_sxd_example_data")`
-   (`sxd_nacl_run.nxs`, `sxd_vanadium_run.nxs`, `sxd_empty_run.nxs`). The public SXD
-   data is a single NaCl orientation, so this exercises the pipeline at N=1. Run
-   `xia2.laue_tof` via subprocess with
-   `unit_cell=5.64,5.64,5.64,90,90,90 space_group=225` + vanadium/empty runs; assert
-   `integrated.{expt,refl}` and the SHELX `.hkl` exist and reflection count is
-   sane. Model on `tests/regression/test_ssx.py`. Mark network/slow.
-   Scaling tail: gate the pointless/lawless assertions on the executables being
-   found (`pytest.mark.skipif`), since neither is a DIALS dependency. Add a
-   **converter-only unit test** that does not need them: build `unmerged.mtz` from
-   the integrated output and assert `LAMBDA` present, `M/ISYM == 1`, one batch
-   record per orientation with `LDTYPE == 3`, non-zero `PHIRANGE`, a non-identity
-   `UMAT`, and base columns in dataset 0. (Add a multi-orientation test later
-   if/when multi-setting SXD data is available.)
-
-8. **Docs** — `doc/sphinx/laue_tof/index.rst` + `basic_usage.rst`, added to the main
-   `doc/sphinx/index.rst` toctree. Model on `doc/sphinx/multiplex/` and
-   `serial_crystallography.rst`. Document the multi-exposure / stationary-crystal
-   model, the vanadium/empty-run inputs, the pointless/lawless requirement (with
-   the version caveat and how to point xia2 at local builds), the Lorentz
-   single-application rule, and how to read `LAMBDANORM`.
-
-## Reuse (do not re-implement)
-
-- `dials.util.options.ArgumentParser`, `iotbx.phil` — CLI/PHIL (as in `cli/ssx.py`).
-- `xia2.Handlers.Streams.setup_logging`, `xia2.Handlers.Files.{FileHandler,cleanup}`,
-  `xia2.Handlers.Citations`, `xia2.Applications.xia2_main.write_citations`.
-- `xia2.Modules.SSX.util.report_timing` and the `subprocess.run` orchestration
-  pattern in `xia2.Modules.SSX.data_integration_standard.run_import`.
-- Multi-experiment combine helpers (`assign_unique_identifiers`, reflection-table
-  concat) as used in `xia2.Modules.MultiCrystal` / SSX data reduction.
-- `src/xia2/Wrappers/Dials/RefineBravaisSettings.py` — reference for running
-  `dials.refine_bravais_settings` and parsing `bravais_summary.json`.
-- `src/xia2/Wrappers/CCP4/Pointless.py` and `Aimless.py` — legacy Driver-based
-  wrappers. **Reference, not reuse**: they assume monochromatic rotation data and
-  the CCP4 `Driver` machinery. Take from them the keyword vocabulary, the XML
-  parsing and the log-scraping idioms; drive the new programs with `subprocess.run`
-  like the rest of this pipeline. `src/xia2/Wrappers/CCP4/Mtz2various.py` **is**
-  directly reusable for the final merged-MTZ → SHELX HKLF4 conversion.
-- MTZ batch-header writing: `/Users/aaronfinke/LADI_files/TIM_2020/aaron/addbatches.py`
-  and `mtz1tomtz.py`, `/Volumes/Finke_NMX/Mandi/CuZnSOD/aaron/lauenorm2mtz.py` —
-  known-good gemmi code with the batch word offsets already correct.
-- Indexing parameter study: `/Users/aaronfinke/ppase_allconfigs/` — the reports
-  (`NMX_indexing_recommendations.html`, `NMX_indexing_study.html`), the harness
-  (`nmxopt/nmx_index_opt.py`, `residuals.py`, `panels.py`, `README.md`), the
-  per-configuration recipes (`configN/opt_NNbins/best*/{find_spots,index}.phil`,
-  `run.sh`) and every trial with its metrics and rejection reason
-  (`results.jsonl`). `cco/` is the same harness on a large-cell P 21 21 21 case.
-  Take the phil files as the defaults' provenance and as regression fixtures; do
-  not re-derive them.
-- TOF reduction: **essnmx** at `/Users/aaronfinke/ess/packages/essnmx`
-  (`ess.nmx`, `ess.mandi`; console scripts `essnmx-reduce`,
-  `essnmx_reduce_mcstas`, `essmandi-reduce`). xia2 shells out to these, exactly as
-  it does to the DIALS and CCP4 programs — no scipp workflow is imported into xia2.
-- Program documentation: `/Users/aaronfinke/aimless/lawless.md` (keywords, input
-  requirements, recommended workflow), `/Users/aaronfinke/aimless/CLAUDE.md`
-  (implementation notes, MTZ pitfalls, Lorentz discussion),
-  `/Users/aaronfinke/aimless/test_data/run_aimless.sh` (invocation pattern).
-- All heavy lifting stays in DIALS / pointless / lawless; xia2 only orchestrates +
-  logs + handles files.
-
-## Risks / open items
-
-- **Consistent indexing across orientations**: each exposure is indexed
-  independently, so alternative indexings / indexing ambiguities must be resolved
-  before combining (otherwise equivalents merge incorrectly downstream). Options:
-  index/refine jointly against a shared crystal model, or resolve ambiguities with
-  `dials.cosym` / reindex to a common setting (the SSX/multiplex approach) before
-  the combine step. Decide during implementation once multi-orientation data is on
-  hand. The NMX study makes seeding the obvious first move: once one exposure
-  indexes, use its crystal model for the rest (converting to the primitive setting
-  in the caller — see the `known_symmetry.A_matrix` defect), which both enforces a
-  common setting and rescues exposures that never autoindex. Note that **pointless
-  cannot be relied on to catch a wrong choice for Laue data** — see the
-  symmetry-determination point below.
-- **The unmerged-MTZ converter is the main new risk surface.** Every requirement in
-  the Step 7 table has been observed to fail *silently* (merged-file collapse,
-  single-batch reporting, flat secondary correction). Validate the file before
-  running pointless — column labels, `M/ISYM`, batch count, `LDTYPE`, `PHIRANGE`,
-  `UMAT` non-identity, dataset layout — and fail loudly with the specific cause.
-- **Pointless cannot determine the Laue group from unnormalised Laue data.** The
-  wavelength dependence inflates disagreement between symmetry mates, so the
-  ranking is unreliable and even the identity operation scores poorly. Always pass
-  `LAUEGROUP` + `CHOOSE SPACEGROUP`; treat any pointless symmetry *suggestion* as
-  informational only, and never let it silently reindex.
-- **Program availability and versions**: pointless must be **> 1.13.6** (local
-  1.16.1 at `/Users/aaronfinke/pointless`); lawless (0.0.1, `/Users/aaronfinke/aimless/build`)
-  is pre-release and not in CCP4, so its keywords may still move. Both need the
-  CCP4 environment sourced (`/Applications/ccp4-9/bin/ccp4.setup-sh`) for libraries
-  and symmetry data. Detect both up front, report versions in the log, and degrade
-  gracefully — if either is missing, stop cleanly after `unmerged.mtz` with a
-  message saying what to install and how to point `scaling.*.executable` at it,
-  rather than failing at the end of a long run.
-- **Double Lorentz / double normalisation**: see
-  [Lorentz: exactly once](#lorentz-exactly-once). Similarly, `dials.tof_integrate`
-  already divides by the measured vanadium spectrum, so lawless's `w(λ)` fits only
-  the *residual* wavelength dependence — expect a much flatter curve than for a
-  LADI/LAUEGEN dataset, and be suspicious of a curve with structure finer than the
-  physics justifies (usually too many GP training bins). Open question to settle on
-  real data: whether it is better to skip the vanadium correction at integration
-  and let lawless fit the whole spectrum. Both paths should remain available.
-- **Environment**: runs against **`dials-dev`** since 2026-10-08 —
-  `/Users/aaronfinke/dials/dials-dev`, branch `tof-profile-1d-mantid`
-  (`7e37c2844`), which is what `.venv` is now built on. It carries #3281, so
-  `profile_1d_ibix` works; `dials-v3-30-0` does not, and its build is stale
-  against its own source (see *Status* → *The DIALS build moved to `dials-dev`*).
-  Note the NMX indexing study was made with 3.30, so its numbers are not
-  strictly like-for-like any more. Each tree's `modules/xia2` is upstream xia2 on
-  `main`, **not** this fork — the fork reaches the interpreter through `.venv`'s
-  editable install, which shadows it. The Phenix-2.1 bundled DIALS lacks
-  `dials.tof_integrate` and the TOF formats — do not use it. The repo's `.venv`
-  (DIALS conda python + `--system-site-packages`) carries the fork and
-  **essnmx/essreduce editable plus the scipp stack**, so all three toolchains are
-  importable from one interpreter — but **not** on `$PATH`: the DIALS dispatchers
-  still need exporting, since every step is found with `shutil.which`.
-- **essnmx availability**: reduction pulls in the scipp stack (scipp, scippnexus,
-  sciline, essreduce, tof, plopp, dask), which is a much heavier dependency than
-  anything else xia2 needs. Keep it **optional and lazily invoked** — a missing
-  `essnmx-reduce` must only fail runs whose input actually needs binning, with a
-  message saying which file and why, never a run given NXlauetof input.
-- **Indexing without a known cell**: works for many Laue-TOF cases;
-  keep `indexing.method` (e.g. `pink_indexer`) exposed as a fallback for hard cases.
-  Supplying `unit_cell`+`space_group` remains the most robust path — and note that
-  every difficult-layout success in the NMX study also needed a **fixed
-  `max_cell`**. **Addressed 2026-10-08**, because it was no longer only a risk:
-  on rubredoxin the nearest-neighbour estimate came back at 23.3 Å for a 44.1 Å
-  axis and returned a halved cell that passed every acceptance check — right
-  space group, 0.59 px residual, 31 % indexed — so nothing in the pipeline
-  flagged it. Trusting the estimate silently is worse than having no default,
-  because the wrong answer looks like a good one. `max_cell` is therefore always
-  fixed now (`indexing.max_cell_fallback`, 150 Å, when there is no cell to
-  derive it from). **The failure mode is not gone, only moved**: a cell with an
-  edge longer than the fallback truncates exactly the same way, just as quietly.
-  The warning that would actually close this — compare the accepted cell's
-  longest axis against the `max_cell` that was used, and say so when it is
-  within reach of it — is still not written, and is the cheapest remaining guard.
-- **Some geometries never autoindex.** config7 and config9 produced nothing in 480
-  and 330 de-novo trials, including transfers of the recipes that cracked their
-  near-identical sibling — a property of what those layouts record, not of the
-  tuning. The pipeline must therefore treat "did not index" as a routine outcome:
-  seed from another exposure, say so in the log and the report, and carry on rather
-  than aborting the run.
-- `refine_bravais_settings` stays a toggleable step (`bravais_settings.enabled`)
-  even though it works with TOF in 3.30 — informational when the space group is
-  already known.
-- **One batch per orientation** means the scale model has few parameters per batch;
-  with only a handful of settings, `SCALES BATCH BFACTOR ON SECONDARY 0` may still
-  be over-parameterised. Keep `scaling.lawless.scales` easily overridable and
-  report the parameter/observation ratio.
-
-## Environment and external programs
-
-Everything runs from `.venv/` in this repo (gitignored), built from the DIALS
-conda python with `--system-site-packages`:
+## Environment
 
 ```
 source .venv/bin/activate
-export PATH=/Users/aaronfinke/dials/dials-dev/conda_base/bin:$PATH
+export PATH=~/dials/dials-dev/conda_base/bin:$PATH
 ```
 
-The second line matters: `.venv/bin` holds the `xia2.*` scripts but **not** the
-DIALS dispatchers, and the steps shell out to `dials.import` etc., so without the
-conda `bin` on `$PATH` the first step fails with *"Unable to find dials.import on
-$PATH"*.
+The second line matters: `.venv/bin` holds the `xia2.*` scripts but no DIALS
+dispatchers, and every step resolves its program with `shutil.which`.
 
 | what | where |
 |---|---|
-| DIALS (in use) | `/Users/aaronfinke/dials/dials-dev` — branch `tof-profile-1d-mantid`, `7e37c2844`, banner `3.dev.1533`. Has #3281, so `profile_1d_ibix` works, and adds `profile_1d_mantid` |
-| DIALS 3.30 (**do not use**) | `/Users/aaronfinke/dials/dials-v3-30-0` — `main` at `14f881d4a`, but its built extensions are from a newer source, so `profile_1d_ibix` fails a Boost.Python signature check. The build the NMX indexing study was made with |
-| essnmx / essreduce | `/Users/aaronfinke/ess/packages/` (editable installs; scipp stack from PyPI, numpy pinned to the DIALS 2.4.6 so the compiled extensions keep working) |
-| xia2 (this fork) | editable install, so `xia2.*` console scripts run this tree, not the DIALS tree's `modules/xia2` |
-| pointless 1.16.1 | `/Users/aaronfinke/pointless/pointless` |
-| lawless 0.0.1 | `/Users/aaronfinke/aimless/build/aimless` |
-| NMX indexing study | `/Users/aaronfinke/ppase_allconfigs/` (+ `cco/` for the large-cell case) |
+| DIALS (in use) | `~/dials/dials-dev` — branch `tof-profile-1d-mantid`, `7e37c2844`. Has #3281, and adds `profile_1d_mantid` |
+| DIALS 3.30 (**do not use**) | `~/dials/dials-v3-30-0` — clean at `main`, but its built extensions come from newer source, so `profile_1d_ibix` fails a Boost.Python signature check and integration silently falls back to summation. The build the NMX study used |
+| essnmx / essreduce | `~/ess/packages/` (editable; scipp from PyPI, numpy pinned to the DIALS build's) |
+| xia2 (this fork) | editable, so `xia2.*` runs this tree and not the DIALS tree's `modules/xia2` |
+| pointless 1.16.1 | `~/pointless/pointless` |
+| lawless 0.0.1 | `~/aimless/build/aimless` |
+| NMX indexing study | `~/ppase_allconfigs/` (+ `cco/`) |
 
-Two things in the venv are hand-made and will not survive recreating it:
-`.venv/share/cctbx` is a symlink to the DIALS `conda_base/share/cctbx` (without
-it `libtbx.load_env` raises `FileNotFoundError`, because libtbx looks under
-`sys.prefix`, which in a venv is the venv), and `.venv/bin/pytest` is a shim that
-runs this venv's interpreter (otherwise a `pytest` from another conda env on
-`$PATH` wins). Both were remade on the 2026-10-08 rebuild. `ruff` is not
-installed in the venv; the one used so far is
-`/Users/aaronfinke/miniforge3/envs/nmx_strategy/bin/ruff`.
+Two venv pieces are hand-made and **will not survive recreating it**:
+`.venv/share/cctbx`, a symlink to the DIALS `conda_base/share/cctbx` (without it
+`libtbx.load_env` raises `FileNotFoundError`, because libtbx looks under
+`sys.prefix`, which in a venv is the venv), and `.venv/bin/pytest`, a shim running
+this venv's interpreter. `ruff` is not in the venv;
+`~/miniforge3/envs/nmx_strategy/bin/ruff` is the one used.
 
-To rebuild `.venv` against a different DIALS tree: create it from that tree's
-`conda_base/bin/python` with `--system-site-packages`, remake the two pieces
-above, then `pip install -e .` for this fork and `-e` the two `ess/packages`
-(which pull the scipp stack in as dependencies) — all **under a
-`numpy==<the DIALS build's version>` constraint**, or pip will move numpy and the
-compiled DIALS extensions stop loading. An editable `dxtbx` install is not
-needed if the tree's `conda_base` already resolves `dxtbx` to its own
-`modules/dxtbx/src`.
+To rebuild against another DIALS tree: create the venv from that tree's
+`conda_base/bin/python` with `--system-site-packages`, remake those two, then
+`pip install -e .` here and `-e` the two `ess/packages` — all under a
+`numpy==<that build's version>` constraint, or pip moves numpy and the compiled
+extensions stop loading. An editable `dxtbx` is unnecessary when the tree's
+`conda_base` already resolves `dxtbx` to its own `modules/dxtbx/src`.
 
 ## Verification
 
-Run everything in the `dials-dev` conda env
-(`/Users/aaronfinke/dials/dials-dev`), through this repo's `.venv`, and with the
-CCP4 environment sourced for pointless/lawless.
-
-1. **Smoke**: `dials.tof_integrate -h` and `xia2.laue_tof -h` both succeed;
-   `python -c "import xia2.cli.laue_tof"`; `/Users/aaronfinke/pointless/pointless -i`
-   reports **1.16.1**; `/Users/aaronfinke/aimless/build/aimless` banner reports
-   **LAWLESS 0.0.1**.
-2. **Binning / input classification**: `classify_input` returns `nxlauetof` for
-   `ppase_allconfigs/cco/config1_binned{50,200}.h5` and `tofraw` for
-   `config1_sampling_output.h5` (both confirmed); `essnmx-reduce --help` and
-   `essmandi-reduce --help` both run in the project venv. Reducing a raw NMX file at `--nbins 50` produces a file that
-   `dials.import` accepts and on which `ExperimentList.all_tof()` is true.
-3. **End-to-end on real SXD data** (single orientation, N=1):
+1. **Smoke**: `xia2.laue_tof -h`; pointless reports 1.16.1; lawless reports 0.0.1.
+2. **End to end on SXD** (N=1, the only public data):
    ```
    dials.data get isis_sxd_example_data
    xia2.laue_tof image=<…>/sxd_nacl_run.nxs \
        unit_cell=5.64,5.64,5.64,90,90,90 space_group=225 \
-       vanadium_run=<…>/sxd_vanadium_run.nxs empty_run=<…>/sxd_empty_run.nxs \
-       scaling.pointless.executable=/Users/aaronfinke/pointless/pointless \
-       scaling.lawless.executable=/Users/aaronfinke/aimless/build/aimless
+       vanadium_run=<…>/sxd_vanadium_run.nxs empty_run=<…>/sxd_empty_run.nxs
    ```
-   Expect: `imported.expt` → `strong.refl` → `indexed.*` → `bravais_summary.json`
-   (logged table) → `refined.*` → `integrated.{expt,refl}` → combined SHELX `.hkl`
-   (with a wavelength column) → `unmerged.mtz` → `sorted.mtz` → `scaled.mtz` +
-   `LAMBDANORM`, plus `xia2.laue_tof.log`. Confirm `ExperimentList.all_tof()` is
-   true on `imported.expt` and integrated reflections carry `wavelength_cal`.
-4. **Converter checks on `unmerged.mtz`** (gemmi, before pointless): `LAMBDA`
-   present with a sane Å range; `M/ISYM` all 1; one batch record per orientation
-   with `LDTYPE == 3`, non-zero `PHIRANGE`, `BSCALE == 1` and a `UMAT` matching the
-   refined crystal orientation; H,K,L,M/ISYM,BATCH in dataset 0 and I,SIGI,LAMBDA in
-   dataset 1 with `LBSETID` pointing at it.
-5. **Pointless passthrough**: `sorted.mtz` still has `LAMBDA`, and the log contains
-   *"Additional unrecognised columns passed unchanged to output file"*. Observation
-   count must match `unmerged.mtz` (a large drop means it was read as merged).
-6. **Lawless**: runs without the *"no wavelength column"* stop; the log reports
-   *"Per-reflection wavelength taken from column LAMBDA"*, the `PROBE NEUTRON`
-   change block, and a wavelength-normalisation table + ASCII plot. Inspect
-   `LAMBDANORM` (`gnuplot -p LAMBDANORM`) — with vanadium normalisation already
-   applied at integration the curve should be close to flat. Check χ² against
-   resolution, intensity and batch; compare R-merge/CC½ with and without
-   `LAUE NORM…` (run `LAMBDAONLY` for an isolated view of `w(λ)`).
-7. ~~**Lorentz applied exactly once**~~ — done 2026-09-22 on MANDI CuZnSOD. Applying
-   it at integration, in lawless, and not at all were compared on the same 124 168
-   reflections: per-shell statistics move little, overall R-merge and CC½ move a lot,
-   and that is the re-weighting described above. The correction is now unconditional,
-   so there is nothing left to select between.
-8. **Indexing defaults**: on an NMX dataset (`~/ppase_allconfigs/configN/`),
-   confirm the pipeline's default recipe reproduces the study's balanced pick to
-   within noise — indexed count, indexed fraction and positional RMSD in the same
-   band as `configN/opt_50bins/best_by_balanced/best.json` — and that the retry
-   ladder recovers a layout (config8/config10) that only `fft1d` indexes. Confirm a
-   seeded C-centred crystal comes back with the *input* cell, not a doubled one.
-9. **Multi-orientation** (when multi-setting data is available): pass several
-   `image=` exposures; confirm each is processed in its own subdirectory, the
-   combined export carries one batch per orientation, and lawless's `RUN 1 BATCH 1
-   TO N` covers them all.
-10. **Regression**: `pytest tests/regression/test_laue_tof.py`.
-11. Sanity-check output intensities/resolution against the DIALS SXD NaCl reference.
+   Expect the full chain to `scaled.mtz` + `LAMBDANORM`, `all_tof()` true on
+   `imported.expt`, and `wavelength_cal` on the integrated reflections.
+3. **MTZ**: `validate_unmerged_mtz` passes with one batch per exposure.
+4. **Pointless passthrough**: `sorted.mtz` still has `LAMBDA` and the observation
+   count matches — a large drop means it was read as merged.
+5. **Lawless**: no "no wavelength column" stop; `PROBE NEUTRON` block printed;
+   `LAMBDANORM` close to flat, vanadium normalisation having already been applied.
+6. **Indexing defaults**: on `~/ppase_allconfigs/configN/`, the default recipe
+   reproduces the study's balanced pick to within noise, and the ladder recovers a
+   layout only `fft1d` indexes. A seeded C-centred crystal comes back with the input
+   cell, not a doubled one.
+7. **Multi-exposure**: several `image=`; one batch per exposure through to the MTZ,
+   and `RUN 1 BATCH 1 TO N` covering them all.
+8. **Regression**: `pytest tests/regression/test_laue_tof.py`.

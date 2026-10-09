@@ -42,9 +42,8 @@ def _candidates(names: tuple[str, ...]) -> list[pathlib.Path]:
     """
     Where a CCP4-side program might be, $PATH before the CCP4 installation.
 
-    That order matters for pointless: the build CCP4 9 ships is too old (1.13.6,
-    which drops the wavelength column), so a newer one earlier on $PATH has to
-    win over it.
+        The order matters: CCP4 9's pointless is too old (1.13.6 drops the
+        wavelength column), so a newer one on $PATH has to win.
     """
     found: list[pathlib.Path] = []
     for name in names:
@@ -94,10 +93,9 @@ def _find_program(
     """
     Where a CCP4-side program is, or a message saying how to say where.
 
-    An explicit path is taken as given, with its version reported but not
-    enforced. Otherwise every candidate is asked its version and the first one
-    new enough wins, so that an old build of pointless earlier in the search
-    order cannot quietly produce a file lawless will refuse.
+        An explicit path is taken as given. Otherwise candidates are asked their
+        version and the first new enough wins, so an old pointless cannot quietly
+        produce a file lawless will refuse.
     """
     if override:
         if not override.is_file():
@@ -218,11 +216,9 @@ def run_pointless(
     """
     Sort the unmerged data and reduce it to the asymmetric unit.
 
-    The Laue group and space group are always given: on unnormalised Laue data
-    the wavelength dependence inflates the disagreement between symmetry mates,
-    so pointless cannot rank the possibilities - it has scored a monoclinic
-    subgroup above the right hexagonal one on data that merges perfectly after
-    normalisation. Any symmetry it suggests is informational only.
+        The symmetry is always given: on unnormalised Laue data the wavelength
+        dependence inflates disagreement between mates, so pointless cannot rank
+        the possibilities. Anything it suggests is informational only.
     """
     program = _find_program(
         ("pointless",), params.executable, "pointless", POINTLESS_MIN_VERSION
@@ -391,9 +387,8 @@ def lawless_xml(xmlout: pathlib.Path) -> ElementTree.Element | None:
     """
     The root of a lawless XML file, repaired if need be.
 
-    lawless 0.0.1 opens the document with <LAWLESS> and closes it with
-    </AIMLESS>, a leftover from the rename, so a strict parser refuses every
-    file it writes.
+        lawless 0.0.1 opens <LAWLESS> and closes </AIMLESS>, so a strict parser
+        refuses every file it writes.
     """
     text = xmlout.read_text()
     try:
@@ -499,9 +494,8 @@ def _report(
     """
     Write the run report from the scaled data.
 
-    The report is the last thing a run produces and the least important thing to
-    get in the way, so a failure in it is reported and does not take the run
-    with it - the data it describes is already written.
+        A failure here is reported but does not fail the run: the data it describes
+        is already written.
     """
     from xia2.Modules.Laue_TOF.laue_tof_report import generate_report
 

@@ -87,10 +87,8 @@ def _batch(
     """
     One batch record for one stationary exposure.
 
-    The crystal is stationary, so the exposure's orientation lives entirely in
-    UMAT. phi is given a one degree pseudo-range per batch because lawless
-    treats a batch with PHIRANGE = 0 as having no valid phi, and every
-    observation then gets ROT = 0.
+        The orientation lives entirely in UMAT. phi gets a one degree pseudo-range
+        because lawless reads PHIRANGE = 0 as having no valid phi.
     """
     batch = gemmi.Mtz.Batch()
     batch.number = number
@@ -161,14 +159,10 @@ def _counts_like_scale(intensity: numpy.ndarray) -> float:
     """
     A power of ten that puts the intensities on a counts-like scale.
 
-    A constant factor on I and SIGI together changes nothing about scaling or
-    merging - it is absorbed by the scale factors - but the size of the numbers
-    is not neutral to the programs that read the file. dials.tof_integrate with
-    corrections.lorentz=True multiplies every intensity by sin^2(theta)/lambda^4,
-    which at neutron wavelengths is of order 1e-3, and pointless then fails its
-    normalisation outright ("NormaliseInRuns::apply Unused run 1"). The MaNDi
-    reduction guards against the same thing by writing 1000*sin^2(theta) rather
-    than sin^2(theta).
+        A constant on I and SIGI together is absorbed by the scale factors, but the
+        size of the numbers is not neutral: the Lorentz correction leaves them of
+        order 1e-3, where pointless fails its normalisation outright
+        ("NormaliseInRuns::apply Unused run 1").
     """
     finite = intensity[numpy.isfinite(intensity)]
     finite = numpy.abs(finite[finite != 0])
@@ -192,9 +186,8 @@ def write_unmerged_mtz(
     """
     Write the combined integrated data as an unmerged Laue MTZ.
 
-    Summation intensities go to I/SIGI and profile-fitted intensities, when the
-    data carry them, to IPR/SIGIPR, so that one file serves either choice
-    downstream and the two can be compared after scaling.
+        Summation goes to I/SIGI and profile fitting, when present, to IPR/SIGIPR,
+        so one file serves either choice and the two can be compared after scaling.
     """
     from dxtbx.serialize import load
 
@@ -335,9 +328,8 @@ def check_wavelength_column(mtz_file: pathlib.Path) -> str:
     """
     The name of the per-observation wavelength column in an MTZ, or "".
 
-    Used to check that a program in the scaling tail has not dropped the
-    wavelength: pointless builds before 1.13.6 do, which makes LAUE fatal in
-    lawless. lawless takes the first of these labels that it finds.
+        pointless builds up to 1.13.6 drop it, which makes LAUE fatal in lawless.
+        lawless takes the first of these labels it finds.
     """
     mtz = gemmi.read_mtz_file(str(mtz_file))
     labels = {column.label.upper(): column.label for column in mtz.columns}
