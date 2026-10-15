@@ -231,11 +231,14 @@ def _laue_graphs(
     """The Laue-specific plots, in the order they should appear."""
     graphs: OrderedDict = OrderedDict()
     if lawless_directory:
-        lambdanorm = lawless_directory / "LAMBDANORM"
-        if lambdanorm.is_file():
-            plot = normalisation_plot(lambdanorm)
-            if plot:
-                graphs["wavelength_normalisation"] = plot
+        # lawless builds differ on whether the file has the .plt suffix
+        for name in ("LAMBDANORM", "LAMBDANORM.plt"):
+            lambdanorm = lawless_directory / name
+            if lambdanorm.is_file():
+                plot = normalisation_plot(lambdanorm)
+                if plot:
+                    graphs["wavelength_normalisation"] = plot
+                break
     band = wavelength_band_plot(scaled_unmerged_mtz)
     if band:
         graphs["wavelength_band"] = band

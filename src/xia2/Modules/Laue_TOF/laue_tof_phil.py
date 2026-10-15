@@ -354,32 +354,6 @@ output {
 
 scaling_phil_str = """
 scaling {
-  pointless {
-    executable = None
-      .type = path
-      .help = "Path to pointless. Defaults to $CCP4/bin/pointless, then $PATH."
-              "The build must be newer than 1.13.6: older ones drop the"
-              "wavelength column, which makes LAUE fatal in lawless."
-      .expert_level = 0
-    lauegroup = None
-      .type = str
-      .help = "Laue group passed to pointless. Defaults to the one implied by"
-              "the space group. Symmetry determination on unnormalised Laue data"
-              "is unreliable - the wavelength dependence inflates the"
-              "disagreement between symmetry mates - so the group is always"
-              "given rather than left to pointless."
-      .expert_level = 0
-    space_group = None
-      .type = space_group
-      .help = "Space group passed to pointless as CHOOSE SPACEGROUP. Defaults to"
-              "the space group used for indexing."
-      .expert_level = 0
-    keywords = None
-      .type = str
-      .multiple = True
-      .help = "Extra pointless keyword lines, appended after the generated ones."
-      .expert_level = 1
-  }
   lawless {
     executable = None
       .type = path
@@ -452,7 +426,7 @@ scaling {
 workflow_phil_str = """
 workflow {
   steps = *find_spots *index *refine *integrate *combine *export \
-          *unmerged_mtz *pointless *lawless *report
+          *unmerged_mtz *lawless *report
     .type = choice(multi=True)
     .help = "Option to turn off particular steps. Multiple choices should be of"
             "the format steps=find_spots+index"

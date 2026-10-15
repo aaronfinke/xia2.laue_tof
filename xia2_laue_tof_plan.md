@@ -3,7 +3,7 @@
 ## Status (2026-10-09)
 
 Runs end to end: import → find_spots → index → refine → tof_integrate → combine
-→ export → unmerged MTZ → pointless → lawless → report. What is left is tuning,
+→ export → unmerged MTZ → lawless → report. What is left is tuning,
 tests and docs, not structure.
 
 | file | what it is |
@@ -12,7 +12,7 @@ tests and docs, not structure.
 | `Modules/Laue_TOF/laue_tof_phil.py` | the phil scope |
 | `Modules/Laue_TOF/data_integration.py` | the step functions and `run_data_integration` |
 | `Modules/Laue_TOF/laue_tof_mtz.py` | finishes dials.export's unmerged MTZ + `validate_unmerged_mtz` |
-| `Modules/Laue_TOF/laue_tof_scale.py` | pointless and lawless steps |
+| `Modules/Laue_TOF/laue_tof_scale.py` | the lawless step |
 | `Modules/Laue_TOF/laue_tof_report.py` | the report step |
 | `Modules/Laue_TOF/util.py` | `report_timing` (copied, never imported from SSX) |
 | `cli/laue_tof.py` | the command, registered in `setup.py` |
@@ -47,6 +47,9 @@ tests and docs, not structure.
    `imageset_id` bookkeeping is tested only by hand.
 5. **Re-add TOF binning** as a step that does not classify input on the pipeline's
    behalf.
+6. **Metric symmetry from `dials.refine_bravais_settings`** when no `space_group`
+   is given. lawless takes the symmetry from the MTZ, which is whatever the
+   experiments carry; nothing checks it any more.
 
 ### Testing convention
 
@@ -70,12 +73,11 @@ spectrum (vanadium), background (empty run) and absorption.
 settings. Each exposure is a full Laue-TOF measurement (a stack of TOF bins, one
 `ImageSequence`) with the crystal still — the contrast with rotation
 crystallography. The whole run goes through the DIALS steps together, then combine
-→ unmerged MTZ → POINTLESS → LAWLESS. Instruments: ISIS SXD (the only public
+→ unmerged MTZ (dials.export) → LAWLESS. Instruments: ISIS SXD (the only public
 `dials_data`), MaNDi, ESS NMX.
 
 DIALS supplies the TOF toolchain; this wires it into one command. Scaling is done
-by two locally built CCP4-side programs, POINTLESS 1.16.1 and LAWLESS 0.0.1 (the
-Laue branch of aimless).
+by a locally built LAWLESS 0.0.1 (the Laue branch of aimless).
 
 ## Decisions
 
@@ -88,7 +90,10 @@ Laue branch of aimless).
 - Formats: `FormatISISSXD`, `FormatMANDI`, `FormatESSNMX`. The `*Laue` variants are
   for TOF-flattened data and are out of scope.
 - `refine_bravais_settings` stays a toggleable, informational step.
-- Local pointless/lawless builds, not CCP4 9's — paths are phil-configurable.
+- Local lawless build — the path is phil-configurable.
+- No POINTLESS: dials.export's MTZ is already sorted and in the asymmetric unit, and
+  lawless reads it directly. Symmetry is known in these experiments; when it is
+  not, `dials.refine_bravais_settings` will supply it, not pointless.
 
 ## DIALS facts worth knowing
 
@@ -104,8 +109,7 @@ Laue branch of aimless).
   `corrections.lorentz` **defaults to False**.
 - **`dials.export format=mtz` handles TOF from dials-dev `df7802f4e`**: one batch
   per experiment, `LAMBDA`, `PANEL`, `TOF`. `LDTYPE = 3` from
-  `12f9cdc1d`. `PHIRANGE = 0`, so pointless puts each exposure in its own run and
-  lawless drops `SECONDARY`, which neutron data do not need. Every batch carries
+  `12f9cdc1d`. `PHIRANGE = 0`, so lawless drops `SECONDARY`, which neutron data do not need. Every batch carries
   the same `ALAMBD`; the report takes each band from `LAMBDA` instead.
 - `dials.export format=shelx` takes the batch from `imageset_id`, which is 0 in
   every per-exposure file — the combine step renumbers it.
@@ -302,13 +306,12 @@ Measured on MANDI CuZnSOD. `L = sin²θ/λ⁴`, and the halves differ:
   purely because the correction re-weights the shells.
 
 Consequence: intensities land ~1e-3 of counts. That once made pointless fail
-(`NormaliseInRuns::apply Unused run 1`), so xia2 rescaled them; pointless 1.16.1 no
-longer fails on hCAII or CuZnSOD at raw scale, and the rescale is gone. Should it
-recur, scale the reflection table in `combine`, not the MTZ. The scale is not quite
+(`NormaliseInRuns::apply Unused run 1`); lawless takes them at raw scale. Should a
+rescale be needed, do it to the reflection table in `combine`, not the MTZ. The scale is not quite
 neutral under `SDCORRECTION REFINE` (the `SdB·I` term): hCAII rejects 1043 outliers
 against 854.
 
-## Scaling tail (POINTLESS → LAWLESS)
+## Scaling tail (LAWLESS)
 
 Reference: `~/aimless/lawless.md`, `~/aimless/CLAUDE.md`.
 
@@ -316,8 +319,6 @@ Reference: `~/aimless/lawless.md`, `~/aimless/CLAUDE.md`.
 per-orientation scale, relative B, absorption and any **residual wavelength
 dependence**. Lawless fits those: aimless plus a wavelength normalisation `w(λ)`,
 as a Chebyshev polynomial or a Gaussian process, with `PROBE NEUTRON` defaults.
-Pointless comes first because lawless needs reflections sorted and on a consistent
-setting.
 
 ### The unmerged MTZ
 
@@ -328,10 +329,10 @@ no MTZ itself. Every requirement below has been observed to fail
 | item | requirement | failure if wrong |
 |---|---|---|
 | `LAMBDA` | per-observation wavelength from `wavelength_cal` | lawless stops when `LAUE` is given |
-| `M/ISYM` | present and **non-zero** (dials.export reduces to the asymmetric unit) | pointless reads the file as merged, collapses observations, drops columns |
-| batch records | one per exposure, `LDTYPE = 3`, a cell, `BSCALE = 1`, `UMAT` = lab-frame orientation including the goniometer setting | no records ⇒ pointless reports one batch regardless of `BATCH`; no `UMAT` ⇒ `SECONDARY`/`ABSORPTION` refines flat with no warning |
+| `M/ISYM` | present and **non-zero** (dials.export reduces to the asymmetric unit) | the file reads as merged |
+| batch records | one per exposure, `LDTYPE = 3`, a cell, `BSCALE = 1`, `UMAT` = lab-frame orientation including the goniometer setting | no records ⇒ one batch regardless of `BATCH`; no `UMAT` ⇒ `SECONDARY`/`ABSORPTION` refines flat with no warning |
 | datasets | `HKL_base` as dataset 0, data in ≥ 1, batch `LBSETID` pointing at the data set | `Dataset::pxdname, setid not found` |
-| `BATCH` | one per exposure, **1-based** (SHELX batches are 0-based); pointless splits one run per exposure and lawless is given `RUN 1 BATCH 1 TO <max>` | mis-scaled or merged-across-settings data |
+| `BATCH` | one per exposure, **1-based** (SHELX batches are 0-based); lawless is given `RUN 1 BATCH 1 TO <max>` | mis-scaled or merged-across-settings data |
 | `ROT`, `PHIRANGE` | 0 | lawless drops `SECONDARY`/`ABSORPTION`, with a warning |
 
 xia2's earlier gemmi writer put `crystal.get_U()` in `UMAT`, without the
@@ -351,30 +352,25 @@ tail:
 
 `w(λ)` agrees within 0.7% on hCAII; on CuZnSOD the GP length scale falls from 0.30
 to 0.12 and the curve differs by up to 19% at the 2.0 Å edge, a few percent
-elsewhere.
+elsewhere. Both rows went through pointless.
 
-### Pointless
+Dropping pointless changes only the cell lawless sees: pointless writes the mean of
+the batch cells, dials.export the median of the experiments'. On hCAII, giving the
+dials file pointless' cell reproduces the pointless result exactly. Without it:
 
-```
-pointless HKLIN unmerged.mtz HKLOUT sorted.mtz XMLOUT pointless.xml <<EOF
-LAUEGROUP P 6/m m m
-CHOOSE SPACEGROUP P 65 2 2
-EOF
-```
+| data | obs | CC½ | outer CC½ | Rmeas |
+|---|---|---|---|---|
+| hCAII hc1, pointless → none | 64222 → 63526 | 0.827 → 0.831 | 0.062 → 0.042 | 0.939 → 0.950 |
+| CuZnSOD proc30, pointless → none | 249967 → 250002 | 0.953 → 0.952 | 0.296 → 0.197 | 0.650 → 0.641 |
 
-- **Always give the symmetry.** Pointless cannot determine the Laue group from
-  unnormalised Laue data: the wavelength dependence inflates disagreement between
-  mates, so even the identity scores badly. Treat any suggestion as informational;
-  never let it silently reindex.
-- **Chosen by version, not by path.** CCP4 9 ships 1.13.6, which drops the
-  wavelength column; the local build is 1.16.1. Every candidate on `$PATH` and in
-  `$CCP4/bin` is asked its version, the first newer than 1.13.6 wins, and the
-  wavelength column is checked afterwards as a backstop.
+hCAII's cell moves 0.2% in b, and outlier rejection goes from 1043 to 1739 under
+`SDCORRECTION REFINE`. CuZnSOD's moves 0.003%, yet outer CC½ swings to 0.277 with
+pointless' cell (0.296 through pointless): that shell is too noisy to rank the two.
 
 ### Lawless
 
 ```
-lawless HKLIN sorted.mtz HKLOUT scaled.mtz XMLOUT lawless.xml <<EOF
+lawless HKLIN unmerged.mtz HKLOUT scaled.mtz XMLOUT lawless.xml <<EOF
 PROBE NEUTRON
 RUN 1 BATCH 1 TO <nbatches>
 SCALES BATCH BFACTOR ON SECONDARY 0
@@ -393,7 +389,7 @@ EOF
   cannot and is **fixed after its pre-pass**, so it cannot trade against the other
   scale terms. `NORMCHEBYSHEV` is refined jointly. They are **mutually exclusive —
   giving both is fatal**. Band limits come from the `wavelength_cal` range.
-- **Both programs need absolute HKLIN paths.** Lawless writes its outputs into its
+- **lawless needs an absolute HKLIN path.** It writes its outputs into its
   working directory, so it gets one of its own, and a relative HKLIN then resolves
   against the wrong place — reported, misleadingly, as *"LAUE requires a wavelength
   for every observation"*. A `Cannot open file` is now caught directly.
@@ -403,8 +399,8 @@ EOF
 - Statistics live in `Result/Dataset/<name>/{Overall,Inner,Outer}`, and the fitted
   curve in `WavelengthNormalisationGPR` or `…Chebyshev`.
 - Outputs registered: `scaled.mtz`, the unmerged output, `lawless.xml`, the log, and
-  **`LAMBDANORM`** — a self-contained gnuplot script of `w(λ)` (GP carries a 1σ
-  band, Chebyshev does not).
+  **`LAMBDANORM`** (`LAMBDANORM.plt` in newer builds) — a self-contained gnuplot
+  script of `w(λ)` (GP carries a 1σ band, Chebyshev does not).
 - **One batch per exposure** means few parameters per batch, so with a handful of
   settings `SCALES BATCH BFACTOR ON SECONDARY 0` may be over-parameterised. Keep
   `scaling.lawless.scales` overridable and report the parameter/observation ratio.
@@ -468,7 +464,6 @@ dispatchers, and every step resolves its program with `shutil.which`.
 | DIALS 3.30 (**do not use**) | `~/dials/dials-v3-30-0` — clean at `main`, but its built extensions come from newer source, so `profile_1d_ibix` fails a Boost.Python signature check and integration silently falls back to summation. The build the NMX study used |
 | essnmx / essreduce | `~/ess/packages/` (editable; scipp from PyPI, numpy pinned to the DIALS build's) |
 | xia2 (this fork) | editable, so `xia2.*` runs this tree and not the DIALS tree's `modules/xia2` |
-| pointless 1.16.1 | `~/pointless/pointless` |
 | lawless 0.0.1 | `~/aimless/build/aimless` |
 | NMX indexing study | `~/ppase_allconfigs/` (+ `cco/`) |
 
@@ -488,7 +483,7 @@ extensions stop loading. An editable `dxtbx` is unnecessary when the tree's
 
 ## Verification
 
-1. **Smoke**: `xia2.laue_tof -h`; pointless reports 1.16.1; lawless reports 0.0.1.
+1. **Smoke**: `xia2.laue_tof -h`; lawless reports 0.0.1.
 2. **End to end on SXD** (N=1, the only public data):
    ```
    dials.data get isis_sxd_example_data
@@ -499,14 +494,12 @@ extensions stop loading. An editable `dxtbx` is unnecessary when the tree's
    Expect the full chain to `scaled.mtz` + `LAMBDANORM`, `all_tof()` true on
    `imported.expt`, and `wavelength_cal` on the integrated reflections.
 3. **MTZ**: `validate_unmerged_mtz` passes with one batch per exposure.
-4. **Pointless passthrough**: `sorted.mtz` still has `LAMBDA` and the observation
-   count matches — a large drop means it was read as merged.
-5. **Lawless**: no "no wavelength column" stop; `PROBE NEUTRON` block printed;
+4. **Lawless**: no "no wavelength column" stop; `PROBE NEUTRON` block printed;
    `LAMBDANORM` close to flat, vanadium normalisation having already been applied.
-6. **Indexing defaults**: on `~/ppase_allconfigs/configN/`, the default recipe
+5. **Indexing defaults**: on `~/ppase_allconfigs/configN/`, the default recipe
    reproduces the study's balanced pick to within noise, and the ladder recovers a
    layout only `fft1d` indexes. A seeded C-centred crystal comes back with the input
    cell, not a doubled one.
-7. **Multi-exposure**: several `image=`; one batch per exposure through to the MTZ,
+6. **Multi-exposure**: several `image=`; one batch per exposure through to the MTZ,
    and `RUN 1 BATCH 1 TO N` covering them all.
-8. **Regression**: `pytest tests/regression/test_laue_tof.py`.
+7. **Regression**: `pytest tests/regression/test_laue_tof.py`.

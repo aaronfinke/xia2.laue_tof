@@ -1,16 +1,14 @@
 """
-Wavelength normalisation, scaling and merging with POINTLESS and LAWLESS.
+Wavelength normalisation, scaling and merging with LAWLESS.
 
 dials.scale and dials.merge are monochromatic: they have no per-observation
 wavelength and no incident-spectrum model, so a Laue dataset cannot be scaled
-with them. The two CCP4-side programs do it instead:
+with them. lawless, the Laue branch of aimless, fits the residual wavelength
+dependence, scales and merges, reading dials.export's MTZ directly.
 
-    pointless   sorts the observations and reduces them to the asymmetric unit
-    lawless     fits the residual wavelength dependence, scales, merges
-
-Neither is a DIALS dependency and lawless is not in CCP4 at all yet, so both are
-looked up and reported rather than assumed, and a run that cannot find them stops
-cleanly after the unmerged MTZ instead of failing at the end of a long job.
+lawless is not in CCP4 yet, so it is looked up and reported rather than assumed,
+and a run that cannot find it stops cleanly after the unmerged MTZ instead of
+failing at the end of a long job.
 """
 
 from __future__ import annotations
@@ -29,22 +27,14 @@ import numpy
 from xia2.Driver.timing import record_step
 from xia2.Handlers.Files import FileHandler
 from xia2.Handlers.Streams import banner
-from xia2.Modules.Laue_TOF.laue_tof import LawlessParams, PointlessParams
+from xia2.Modules.Laue_TOF.laue_tof import LawlessParams
 from xia2.Modules.Laue_TOF.laue_tof_mtz import check_wavelength_column
 
 xia2_logger = logging.getLogger(__name__)
 
-# The build that first kept the wavelength column through sorting
-POINTLESS_MIN_VERSION = (1, 13, 6)
-
 
 def _candidates(names: tuple[str, ...]) -> list[pathlib.Path]:
-    """
-    Where a CCP4-side program might be, $PATH before the CCP4 installation.
-
-        The order matters: CCP4 9's pointless is too old (1.13.6 drops the
-        wavelength column), so a newer one on $PATH has to win.
-    """
+    """Where a CCP4-side program might be, $PATH before the CCP4 installation."""
     found: list[pathlib.Path] = []
     for name in names:
         on_path = shutil.which(name)
@@ -85,58 +75,20 @@ def _ccp4_version(program: pathlib.Path) -> tuple[int, ...] | None:
 
 
 def _find_program(
-    names: tuple[str, ...],
-    override: pathlib.Path | None,
-    what: str,
-    minimum_version: tuple[int, ...] | None = None,
+    names: tuple[str, ...], override: pathlib.Path | None, what: str
 ) -> pathlib.Path:
-    """
-    Where a CCP4-side program is, or a message saying how to say where.
-
-        An explicit path is taken as given. Otherwise candidates are asked their
-        version and the first new enough wins, so an old pointless cannot quietly
-        produce a file lawless will refuse.
-    """
-    if override:
-        if not override.is_file():
-            raise FileNotFoundError(f"{what} is not at {override}")
-        version = _ccp4_version(override)
-        xia2_logger.info(
-            f"Using {what} {_version_string(version)} from {override}"
-            if version
-            else f"Using {what} from {override}"
-        )
-        if minimum_version and version and version <= minimum_version:
-            xia2_logger.warning(
-                f"{override} reports version {_version_string(version)}, which is"
-                f" not newer than {_version_string(minimum_version)}; it may drop"
-                " the wavelength column."
-            )
-        return override
-
-    too_old = []
-    for candidate in _candidates(names):
+    """Where a CCP4-side program is, or a message saying how to say where."""
+    if override and not override.is_file():
+        raise FileNotFoundError(f"{what} is not at {override}")
+    candidates = [override] if override else _candidates(names)
+    for candidate in candidates:
         version = _ccp4_version(candidate)
-        if minimum_version and version and version <= minimum_version:
-            too_old.append((candidate, version))
-            continue
         xia2_logger.info(
             f"Using {what} {_version_string(version)} from {candidate}"
             if version
             else f"Using {what} from {candidate}"
         )
         return candidate
-
-    if too_old:
-        listed = ", ".join(
-            f"{path} ({_version_string(version)})" for path, version in too_old
-        )
-        raise FileNotFoundError(
-            f"The only {what} found is too old: {listed}. A build newer than"
-            f" {_version_string(minimum_version)} is needed, because older ones"
-            " drop the wavelength column and lawless then cannot run LAUE. Point"
-            f" scaling.{names[0]}.executable at a newer build."
-        )
     raise FileNotFoundError(
         f"Unable to find {what} ({' or '.join(names)}) on $PATH or in $CCP4/bin."
         f" Install it, or give its location with scaling.{names[0]}.executable."
@@ -205,73 +157,6 @@ def _wavelength_range(mtz_file: pathlib.Path) -> tuple[float, float]:
     mtz = gemmi.read_mtz_file(os.fspath(mtz_file))
     values = numpy.asarray(mtz.column_with_label(label).array)
     return float(values.min()), float(values.max())
-
-
-def run_pointless(
-    working_directory: pathlib.Path,
-    hklin: pathlib.Path,
-    params: PointlessParams,
-    hklout_name: str = "sorted.mtz",
-) -> pathlib.Path:
-    """
-    Sort the unmerged data and reduce it to the asymmetric unit.
-
-        The symmetry is always given: on unnormalised Laue data the wavelength
-        dependence inflates disagreement between mates, so pointless cannot rank
-        the possibilities. Anything it suggests is informational only.
-    """
-    program = _find_program(
-        ("pointless",), params.executable, "pointless", POINTLESS_MIN_VERSION
-    )
-    working_directory = working_directory.resolve()
-    # HKLIN is resolved because these programs run in a directory of their own
-    hklin = hklin.resolve()
-    hklout = working_directory / hklout_name
-    xia2_logger.notice(banner("Sorting with pointless"))  # type: ignore
-
-    keywords = []
-    if params.lauegroup:
-        keywords.append(f"LAUEGROUP {params.lauegroup}")
-    if params.space_group:
-        keywords.append(f"CHOOSE SPACEGROUP {params.space_group}")
-    if not keywords:
-        raise ValueError(
-            "Neither a Laue group nor a space group is known, and pointless"
-            " cannot determine symmetry from unnormalised Laue data. Give"
-            " space_group, or scaling.pointless.lauegroup."
-        )
-    keywords += params.keywords
-    for line in keywords:
-        xia2_logger.info(f"  {line}")
-
-    _run(
-        program,
-        [
-            "HKLIN",
-            os.fspath(hklin),
-            "HKLOUT",
-            hklout_name,
-            "XMLOUT",
-            "pointless.xml",
-        ],
-        keywords,
-        working_directory,
-        working_directory / "pointless.log",
-        "pointless",
-    )
-    if not hklout.is_file():
-        raise ValueError(f"pointless did not write {hklout}")
-
-    if not check_wavelength_column(hklout):
-        raise ValueError(
-            f"pointless dropped the wavelength column from {hklout.name}, which"
-            " makes LAUE fatal in lawless. This build is too old: a build newer"
-            f" than {'.'.join(str(v) for v in POINTLESS_MIN_VERSION)} is needed."
-            " Point scaling.pointless.executable at one."
-        )
-    FileHandler.record_data_file(str(hklout))
-    xia2_logger.info(f"Sorted data written to {hklout.name}")
-    return hklout
 
 
 def lawless_keywords(
@@ -522,7 +407,6 @@ def _report(
 def scale(
     working_directory: pathlib.Path,
     unmerged_mtz: pathlib.Path,
-    pointless_params: PointlessParams,
     lawless_params: LawlessParams,
     lorentz_applied: bool,
     steps: list[str],
@@ -534,17 +418,12 @@ def scale(
     A missing program is reported and the run stops here with the unmerged MTZ
     in hand, rather than failing after everything that came before it.
     """
-    sorted_mtz = unmerged_mtz
+    if "lawless" not in steps:
+        return None
     try:
-        if "pointless" in steps:
-            sorted_mtz = run_pointless(
-                working_directory, unmerged_mtz, pointless_params
-            )
-        if "lawless" not in steps:
-            return sorted_mtz if sorted_mtz != unmerged_mtz else None
         scaled = run_lawless(
             working_directory / "scaled",
-            sorted_mtz,
+            unmerged_mtz,
             lawless_params,
             lorentz_applied,
         )

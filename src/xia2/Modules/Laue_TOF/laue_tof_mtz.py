@@ -22,8 +22,7 @@ def check_wavelength_column(mtz_file: pathlib.Path) -> str:
     """
     The name of the per-observation wavelength column in an MTZ, or "".
 
-    pointless builds up to 1.13.6 drop it, which makes LAUE fatal in lawless.
-    lawless takes the first of these labels it finds.
+    lawless stops on LAUE without it, and takes the first of these labels it finds.
     """
     mtz = gemmi.read_mtz_file(str(mtz_file))
     labels = {column.label.upper(): column.label for column in mtz.columns}
@@ -58,15 +57,11 @@ def validate_unmerged_mtz(
         misym = numpy.asarray(mtz.column_with_label("M/ISYM").array)
         if misym.size and not bool((misym > 0).all()):
             problems.append(
-                "M/ISYM is 0 for some observations, so pointless will read the"
-                " file as merged and collapse them"
+                "M/ISYM is 0 for some observations, so the file reads as merged"
             )
 
     if not mtz.batches:
-        problems.append(
-            "no batch records, so pointless will report one batch whatever the"
-            " BATCH column says"
-        )
+        problems.append("no batch records, so lawless cannot tell the exposures apart")
     else:
         if expected_batches is not None and len(mtz.batches) != expected_batches:
             problems.append(

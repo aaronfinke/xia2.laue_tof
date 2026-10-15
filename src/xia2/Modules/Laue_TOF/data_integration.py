@@ -1451,7 +1451,7 @@ def unmerged_mtz(
     experiments: str = "combined.expt",
     reflections: str = "combined.refl",
 ) -> pathlib.Path:
-    """Run dials.export format=mtz, for pointless and lawless."""
+    """Run dials.export format=mtz, for lawless."""
     from xia2.Modules.Laue_TOF.laue_tof_mtz import validate_unmerged_mtz
 
     # Both intensities when there are profiles: lawless scales on IPR first
@@ -1586,13 +1586,12 @@ def run_data_integration(
         return results
     mtz_file = unmerged_mtz(scale_directory, setup.export_params)
 
-    if "pointless" in setup.options.steps or "lawless" in setup.options.steps:
+    if "lawless" in setup.options.steps:
         from xia2.Modules.Laue_TOF.laue_tof_scale import scale
 
         scale(
             scale_directory,
             mtz_file,
-            setup.pointless_params,
             setup.lawless_params,
             _lorentz_applied(reflections_file),
             setup.options.steps,

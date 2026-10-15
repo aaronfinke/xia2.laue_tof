@@ -378,39 +378,6 @@ class ExportParams:
 
 
 @dataclass
-class PointlessParams:
-    executable: pathlib.Path | None = None
-    lauegroup: str | None = None
-    space_group: sgtbx.space_group | None = None
-    keywords: list[str] = field(default_factory=list)
-
-    @classmethod
-    def from_phil(cls, params: iotbx.phil.scope_extract) -> PointlessParams:
-        pointless = params.scaling.pointless
-        space_group = pointless.space_group or params.space_group
-        lauegroup = pointless.lauegroup
-        if lauegroup is None and space_group:
-            group = (
-                space_group.group() if hasattr(space_group, "group") else space_group
-            )
-            lauegroup = (
-                sgtbx.space_group_info(
-                    group=group.build_derived_reflection_intensity_group(
-                        anomalous_flag=False
-                    )
-                )
-                .type()
-                .lookup_symbol()
-            )
-        return cls(
-            _resolved_file(pointless.executable),
-            lauegroup,
-            space_group,
-            [line for line in pointless.keywords if line],
-        )
-
-
-@dataclass
 class LawlessParams:
     executable: pathlib.Path | None = None
     probe: str = "neutron"
@@ -467,7 +434,6 @@ class LaueTOFSetup:
     indexing_params: IndexingParams
     integration_params: IntegrationParams
     export_params: ExportParams
-    pointless_params: PointlessParams
     lawless_params: LawlessParams
     options: AlgorithmParams
 
@@ -557,7 +523,6 @@ def setup_from_phil(params: iotbx.phil.scope_extract) -> LaueTOFSetup:
         indexing_params=IndexingParams.from_phil(params),
         integration_params=IntegrationParams.from_phil(params, file_input),
         export_params=ExportParams.from_phil(params),
-        pointless_params=PointlessParams.from_phil(params),
         lawless_params=LawlessParams.from_phil(params),
         options=AlgorithmParams.from_phil(params),
     )
