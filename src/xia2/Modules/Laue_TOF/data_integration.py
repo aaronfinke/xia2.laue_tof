@@ -854,6 +854,8 @@ def refine(working_directory: pathlib.Path) -> None:
         f"refinement.parameterisation.detector.panels={DETECTOR_PANELS}",
         "refinement.parameterisation.detector.hierarchy_level"
         f"={DETECTOR_HIERARCHY_LEVEL}",
+        # MaNDi's 40 panels outnumber ~100 spots per exposure; those keep the DetCal
+        "refinement.parameterisation.auto_reduction.action=fix",
     ]
     xia2_logger.notice(banner("Refining"))  # type: ignore
     _run_program(command, working_directory, "dials.refine")
@@ -1425,7 +1427,7 @@ def export_shelx(
         reflections,
         "format=shelx",
         f"intensity={intensity}",
-        f"shelx.composition={params.composition}",
+        f"small_molecule.composition={params.composition}",
     ]
     if params.phil:
         command.insert(1, os.fspath(params.phil))

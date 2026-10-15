@@ -111,6 +111,7 @@ by a locally built LAWLESS 0.0.1 (the Laue branch of aimless).
   per experiment, `LAMBDA`, `PANEL`, `TOF`. `LDTYPE = 3` from
   `12f9cdc1d`. `PHIRANGE = 0`, so lawless drops `SECONDARY`, which neutron data do not need. Every batch carries
   the same `ALAMBD`; the report takes each band from `LAMBDA` instead.
+- SHELX `composition` is `small_molecule.composition` since DIALS #3269.
 - `dials.export format=shelx` takes the batch from `imageset_id`, which is 0 in
   every per-exposure file — the combine step renumbers it.
 - `dials.tof_integrate` leaves **no record of the Lorentz correction**: it
@@ -139,6 +140,10 @@ Each cost a session; none is visible from the code.
   (three panels on one root group), so level 0 is the whole detector as one body —
   16 parameters, identical residuals to `automatic`. Level 1 reaches the panels, 28
   parameters, per-panel RMSD 0.32 px.
+- **Refinement fixes panels it cannot parameterise** (`auto_reduction.action=fix`).
+  Level 1 on MaNDi is 40 panel groups × 6 parameters against ~100 spots per
+  exposure; hCAII keeps 37 of 40 at their DetCal positions and refines to
+  0.7–1.3 px.
 - **`max_strong` is per exposure**, since the predictor assertion it guards is
   reached per refinement job (`dials.refine` refines each exposure separately and
   recombines).
