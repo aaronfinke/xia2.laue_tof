@@ -11,7 +11,7 @@ tests and docs, not structure.
 | `Modules/Laue_TOF/laue_tof.py` | `*Params` dataclasses, `setup_from_phil`, `run_xia2_laue_tof` |
 | `Modules/Laue_TOF/laue_tof_phil.py` | the phil scope |
 | `Modules/Laue_TOF/data_integration.py` | the step functions and `run_data_integration` |
-| `Modules/Laue_TOF/laue_tof_mtz.py` | unmerged Laue MTZ writer + `validate_unmerged_mtz` |
+| `Modules/Laue_TOF/laue_tof_mtz.py` | finishes dials.export's unmerged MTZ + `validate_unmerged_mtz` |
 | `Modules/Laue_TOF/laue_tof_scale.py` | pointless and lawless steps |
 | `Modules/Laue_TOF/laue_tof_report.py` | the report step |
 | `Modules/Laue_TOF/util.py` | `report_timing` (copied, never imported from SSX) |
@@ -43,7 +43,7 @@ tests and docs, not structure.
    failure rather than removing it: a cell longer than the fallback still
    truncates silently.
 4. **Tests, then docs.** 3 tests, all gated on a MANDI file that may be absent; no
-   SXD case, no converter unit test, no `doc/sphinx` page. The multi-exposure
+   SXD case, no `doc/sphinx` page. The multi-exposure
    `imageset_id` bookkeeping is tested only by hand.
 5. **Re-add TOF binning** as a step that does not classify input on the pipeline's
    behalf.
@@ -102,8 +102,10 @@ Laue branch of aimless).
 - `dials.find_spots` auto-selects `TOFSpotFinder`.
 - `dials.tof_integrate` options live under `corrections{}`, not top level, and
   `corrections.lorentz` **defaults to False**.
-- **`dials.export format=mtz` is refused for TOF data**, and would be wrong anyway:
-  no per-reflection wavelength, `M/ISYM = 0`, `LDTYPE = 2`. Hence xia2's own writer.
+- **`dials.export format=mtz` handles TOF from dials-dev `df7802f4e`**: one batch
+  per experiment, `LAMBDA`, `PANEL`, `TOF`. It still writes `LDTYPE = 2`,
+  `PHIRANGE = 0`, one `ALAMBD` for every batch, and unrescaled intensities, so
+  `finish_unmerged_mtz` fixes those. Batches are numbered 1, 101, 201, …
 - `dials.export format=shelx` takes the batch from `imageset_id`, which is 0 in
   every per-exposure file — the combine step renumbers it.
 - `dials.tof_integrate` leaves **no record of the Lorentz correction**: it
@@ -317,22 +319,33 @@ setting.
 
 ### The unmerged MTZ
 
-Written with gemmi by `laue_tof_mtz.py`. Every requirement below has been observed
-to fail **silently**, so `validate_unmerged_mtz` re-reads the file and fails loudly
-on each.
+Written by `dials.export format=mtz intensity=profile+sum` (or `sum`), then
+patched by `finish_unmerged_mtz`. Every requirement below has been observed to fail
+**silently**, so `validate_unmerged_mtz` re-reads the file and fails loudly on each.
 
 | item | requirement | failure if wrong |
 |---|---|---|
 | `LAMBDA` | per-observation wavelength from `wavelength_cal` | lawless stops when `LAUE` is given |
-| `M/ISYM` | present and **1 throughout** | pointless reads the file as merged, collapses observations, drops columns |
-| batch records | one per exposure, `LDTYPE = 3`, a cell, non-zero `PHIRANGE`, `BSCALE = 1`, `UMAT` = refined orientation | no records ⇒ pointless reports one batch regardless of `BATCH`; no `UMAT` ⇒ `SECONDARY`/`ABSORPTION` refines flat with no warning |
+| `M/ISYM` | present and **non-zero** (dials.export reduces to the asymmetric unit) | pointless reads the file as merged, collapses observations, drops columns |
+| batch records | one per exposure, `LDTYPE = 3`, a cell, non-zero `PHIRANGE`, `BSCALE = 1`, `UMAT` = lab-frame orientation including the goniometer setting | no records ⇒ pointless reports one batch regardless of `BATCH`; no `UMAT` ⇒ `SECONDARY`/`ABSORPTION` refines flat with no warning; `PHIRANGE = 0` ⇒ lawless drops them (`insufficient information for secondary beam scaling`) |
 | datasets | `HKL_base` as dataset 0, data in ≥ 1, batch `LBSETID` pointing at the data set | `Dataset::pxdname, setid not found` |
-| `BATCH` | one per exposure, **1-based** (SHELX batches are 0-based) | mis-scaled or merged-across-settings data |
-| `ROT` | per-batch φ, optional | lawless substitutes the batch number; harmless for stationary exposures |
+| `BATCH` | one per exposure, **1-based** (SHELX batches are 0-based); not contiguous, so pointless splits runs and lawless is given `RUN 1 BATCH 1 TO <max>` | mis-scaled or merged-across-settings data |
+| `ROT` | 0 | harmless for stationary exposures |
 
-Batch word offsets (`I_LDTYPE=14`, `F_UMAT=6`, `F_PHISTT=36`, `F_PHIRANGE=47`,
-`F_BSCALE=43`, `F_ALAMBD=86`, `F_DELAMB=87`) are copied from
-`~/LADI_files/TIM_2020/aaron/addbatches.py`, not re-derived.
+xia2's earlier gemmi writer put `crystal.get_U()` in `UMAT`, without the
+goniometer setting, so every exposure carried nearly the same orientation (hCAII:
+0–0.5° apart where the goniometer stepped 10°). dials.export's lab-frame `UMAT`
+fixes that, and lawless now warns that batches in the run differ in orientation —
+expected. It also drops summation-only (fallback) reflections under
+`profile+sum` and reflections with non-positive variance, a few percent.
+
+Measured old writer against dials.export, same `combined.refl`, same tail:
+
+| data | obs | CC½ | outer CC½ | Rmeas |
+|---|---|---|---|---|
+| hCAII hc1 (hand-tuned lawless) | 64437 → 64411 | 0.826 → 0.823 | 0.086 → 0.041 | 0.942 → 0.935 |
+| CuZnSOD proc30 (defaults) | 250152 → 249967 | 0.947 → 0.953 | 0.282 → 0.296 | 0.655 → 0.650 |
+| CuZnSOD proc30, `SECONDARY 4` | 250282 → 250191 | 0.949 → 0.956 | 0.281 → 0.179 | 0.647 → 0.635 |
 
 ### Pointless
 
@@ -445,7 +458,7 @@ dispatchers, and every step resolves its program with `shutil.which`.
 
 | what | where |
 |---|---|
-| DIALS (in use) | `~/dials/dials-dev` — branch `tof-profile-1d-mantid`, `7e37c2844`. Has #3281, and adds `profile_1d_mantid` |
+| DIALS (in use) | `~/dials/dials-dev` — branch `tof-profile-1d-mantid`, `df7802f4e`. Has #3281, adds `profile_1d_mantid` and TOF MTZ export |
 | DIALS 3.30 (**do not use**) | `~/dials/dials-v3-30-0` — clean at `main`, but its built extensions come from newer source, so `profile_1d_ibix` fails a Boost.Python signature check and integration silently falls back to summation. The build the NMX study used |
 | essnmx / essreduce | `~/ess/packages/` (editable; scipp from PyPI, numpy pinned to the DIALS build's) |
 | xia2 (this fork) | editable, so `xia2.*` runs this tree and not the DIALS tree's `modules/xia2` |

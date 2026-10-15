@@ -335,6 +335,8 @@ output {
             "integration.min_profile_fraction of the reflections, and the"
             "summation intensities otherwise. dials.export refuses its own auto"
             "when both columns exist, so one is always chosen here explicitly."
+            "The unmerged MTZ carries summation intensities as well when"
+            "profile is chosen."
     .expert_level = 0
   composition = CH
     .type = str

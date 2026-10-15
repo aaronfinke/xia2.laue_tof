@@ -1447,21 +1447,42 @@ def export_shelx(
 
 def unmerged_mtz(
     working_directory: pathlib.Path,
-    experiments_file: pathlib.Path,
-    reflections_file: pathlib.Path,
+    params: ExportParams,
+    experiments: str = "combined.expt",
+    reflections: str = "combined.refl",
 ) -> pathlib.Path:
-    """
-    Write the combined data as an unmerged Laue MTZ, for pointless and lawless.
+    """Run dials.export format=mtz and finish the file for pointless and lawless."""
+    from xia2.Modules.Laue_TOF.laue_tof_mtz import finish_unmerged_mtz
 
-    dials.export cannot do this - format=mtz is refused for time-of-flight data
-    - so xia2 writes the file itself.
-    """
-    from xia2.Modules.Laue_TOF.laue_tof_mtz import write_unmerged_mtz
+    # Both intensities when there are profiles: lawless scales on IPR first
+    intensity = _intensity_choice(working_directory / reflections, params)
+    if intensity == "profile":
+        intensity = "profile+sum"
+    command = [
+        _executable("dials.export"),
+        experiments,
+        reflections,
+        "format=mtz",
+        f"intensity={intensity}",
+        "mtz.hklout=unmerged.mtz",
+        "mtz.project_name=xia2.laue_tof",
+        "output.log=dials.export_mtz.log",
+    ]
+    if params.phil:
+        command.insert(1, os.fspath(params.phil))
 
     xia2_logger.notice(banner("Writing the unmerged MTZ"))  # type: ignore
-    mtz_file = write_unmerged_mtz(
-        experiments_file, reflections_file, working_directory / "unmerged.mtz"
+    _run_program(command, working_directory, "dials.export")
+    _record_log("export_mtz", working_directory / "dials.export_mtz.log")
+
+    mtz_file = working_directory / "unmerged.mtz"
+    if not mtz_file.is_file():
+        raise ValueError("dials.export did not write unmerged.mtz")
+    n_experiments = len(
+        load.experiment_list(working_directory / experiments, check_format=False)
     )
+    finish_unmerged_mtz(mtz_file, expected_batches=n_experiments)
+    xia2_logger.info(f"Exported the {intensity} intensities to {mtz_file.name}")
     FileHandler.record_data_file(str(mtz_file))
     return mtz_file
 
@@ -1563,7 +1584,7 @@ def run_data_integration(
         export_shelx(scale_directory, setup.export_params)
     if "unmerged_mtz" not in setup.options.steps:
         return results
-    mtz_file = unmerged_mtz(scale_directory, experiments_file, reflections_file)
+    mtz_file = unmerged_mtz(scale_directory, setup.export_params)
 
     if "pointless" in setup.options.steps or "lawless" in setup.options.steps:
         from xia2.Modules.Laue_TOF.laue_tof_scale import scale
