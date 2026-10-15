@@ -1451,8 +1451,8 @@ def unmerged_mtz(
     experiments: str = "combined.expt",
     reflections: str = "combined.refl",
 ) -> pathlib.Path:
-    """Run dials.export format=mtz and finish the file for pointless and lawless."""
-    from xia2.Modules.Laue_TOF.laue_tof_mtz import finish_unmerged_mtz
+    """Run dials.export format=mtz, for pointless and lawless."""
+    from xia2.Modules.Laue_TOF.laue_tof_mtz import validate_unmerged_mtz
 
     # Both intensities when there are profiles: lawless scales on IPR first
     intensity = _intensity_choice(working_directory / reflections, params)
@@ -1481,7 +1481,7 @@ def unmerged_mtz(
     n_experiments = len(
         load.experiment_list(working_directory / experiments, check_format=False)
     )
-    finish_unmerged_mtz(mtz_file, expected_batches=n_experiments)
+    validate_unmerged_mtz(mtz_file, expected_batches=n_experiments)
     xia2_logger.info(f"Exported the {intensity} intensities to {mtz_file.name}")
     FileHandler.record_data_file(str(mtz_file))
     return mtz_file

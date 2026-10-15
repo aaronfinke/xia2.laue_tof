@@ -29,7 +29,6 @@ from jinja2 import ChoiceLoader, Environment, PackageLoader
 from xia2.Handlers.Files import FileHandler
 from xia2.Handlers.Streams import banner
 from xia2.Modules.Analysis import phil_scope
-from xia2.Modules.Laue_TOF.laue_tof_mtz import F_ALAMBD, F_DELAMB
 from xia2.Modules.Laue_TOF.laue_tof_scale import lawless_xml
 from xia2.Modules.Report import Report
 from xia2.XIA2Version import Version
@@ -137,13 +136,17 @@ def normalisation_plot(lambdanorm: pathlib.Path) -> dict | None:
 
 
 def wavelength_band_plot(mtz_file: pathlib.Path) -> dict | None:
-    """The wavelength band each orientation contributed, from the batch headers."""
+    """The wavelength band each orientation contributed, from its observations."""
     mtz = gemmi.read_mtz_file(os.fspath(mtz_file))
-    if not mtz.batches:
+    labels = [column.label for column in mtz.columns]
+    if "BATCH" not in labels or "LAMBDA" not in labels:
         return None
-    numbers = [batch.number for batch in mtz.batches]
-    centres = [batch.floats[F_ALAMBD] for batch in mtz.batches]
-    widths = [batch.floats[F_DELAMB] for batch in mtz.batches]
+    batch = numpy.asarray(mtz.column_with_label("BATCH").array)
+    wavelength = numpy.asarray(mtz.column_with_label("LAMBDA").array)
+    numbers = sorted({int(number) for number in batch})
+    bands = [wavelength[batch == number] for number in numbers]
+    centres = [float(band.mean()) for band in bands]
+    widths = [0.5 * float(band.max() - band.min()) for band in bands]
     return {
         "data": [
             {
