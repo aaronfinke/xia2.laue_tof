@@ -688,6 +688,11 @@ def _merge_indexed(
         new_id = len(experiments)
         rows["id"] = flex.int(rows.size(), new_id)
         rows["imageset_id"] = flex.int(rows.size(), new_id)
+        # The map is keyed by the rung's position; two rungs share positions
+        identifiers = rows.experiment_identifiers()
+        for key in list(identifiers.keys()):
+            del identifiers[key]
+        identifiers[new_id] = expts[position].identifier
         experiments.append(expts[position])
         tables.append(rows)
 
