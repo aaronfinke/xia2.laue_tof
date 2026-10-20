@@ -362,6 +362,7 @@ class ExportParams:
     d_min: float | None = None
     d_max: float | None = None
     phil: pathlib.Path | None = None
+    min_two_theta: float | None = None
 
     @classmethod
     def from_phil(cls, params: iotbx.phil.scope_extract) -> ExportParams:
@@ -383,6 +384,7 @@ class ExportParams:
             params.d_min,
             params.d_max,
             _resolved_file(params.output.phil),
+            params.min_two_theta,
         )
 
 

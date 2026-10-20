@@ -61,6 +61,13 @@ d_max = None
           "d_min, applied to the integrated reflections rather than to the"
           "spot list."
   .expert_level = 0
+min_two_theta = None
+  .type = float(value_min=0, value_max=180)
+  .help = "Lowest scattering angle of the data that is kept, in degrees."
+          "Applied with d_min/d_max to the integrated reflections. For a"
+          "beamstop shadow, which spotfinding never sees but a calculated"
+          "integration fills with weak reflections that look precise."
+  .expert_level = 1
 multiprocessing {
   nproc = Auto
     .type = int

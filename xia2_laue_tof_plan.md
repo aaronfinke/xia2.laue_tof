@@ -179,6 +179,13 @@ Each cost a session; none is visible from the code.
 - **TOF binning changes what indexes.** Blind, rubredoxin gives the full cell at 100
   bins and a halved one at 50 and 200 — `max_cell` does not rescue it, a known cell
   does. Binning is a parameter, not a default.
+- **A calculated pass integrates the beamstop shadow.** The NMX McStas instruments
+  put a 6LiF beamstop 5–15 mm behind the sample (r 3.5 mm), shadowing 2θ < ~35°.
+  Spotfinding finds nothing there, but prediction does: on rubredoxin, I/I_true is
+  0.001–0.06 below 30° and 0.44 at 30–35°, still at I/σ 5–22 because McStas
+  weights give tiny variances. CC½ fell from 0.95 (observed) to 0.42 and the GPR
+  length scale to 0.039 Å. `min_two_theta` cuts by each reflection's `s1` in
+  `combine`, alongside `d_min`/`d_max`.
 - **Identical `image=` values are deduplicated by phil**, and `resolve_paths`
   resolves symlinks, so two links to one file become one path but still two entries.
   Use real copies to fake a multi-exposure test.

@@ -8,6 +8,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass, field
 
+import numpy
 from dials.array_family import flex
 from dials.util.multi_dataset_handling import (
     assign_unique_identifiers,
@@ -1258,6 +1259,32 @@ def _apply_resolution_limits(
     return table.select(keep)
 
 
+def _apply_two_theta_limit(
+    table: flex.reflection_table,
+    experiments,
+    min_two_theta: float | None,
+) -> flex.reflection_table:
+    """Keep only the reflections scattered through at least min_two_theta."""
+    if min_two_theta is None:
+        return table
+    unit_s0 = numpy.array([expt.beam.get_unit_s0() for expt in experiments])
+    s0 = unit_s0[table["id"].as_numpy_array()]
+    s1 = table["s1"].as_numpy_array()
+    cos_two_theta = (s0 * s1).sum(axis=1) / numpy.linalg.norm(s1, axis=1)
+    two_theta = numpy.degrees(numpy.arccos(numpy.clip(cos_two_theta, -1, 1)))
+    keep = two_theta >= min_two_theta
+    xia2_logger.info(
+        f"Keeping {keep.sum()} of {table.size()} reflections scattered through"
+        f" at least {min_two_theta:g} deg (min_two_theta)"
+    )
+    if not keep.any():
+        raise ValueError(
+            "min_two_theta leaves no reflections. The integrated data spans"
+            f" 2theta {two_theta.min():.1f}-{two_theta.max():.1f} deg."
+        )
+    return table.select(flex.bool(keep))
+
+
 def combine(
     working_directory: pathlib.Path,
     integrated_directory: pathlib.Path,
@@ -1268,8 +1295,8 @@ def combine(
     Split the run's integrated output per exposure, ready to export.
 
     Each exposure gets its own identifier and batch, so it can be scaled per
-    setting. d_min/d_max is applied here, so the export, the MTZ and the
-    scaling all see the same cut.
+    setting. d_min/d_max and min_two_theta are applied here, so the export,
+    the MTZ and the scaling all see the same cut.
     """
     indexed = [result for result in results if result.indexed]
     if not indexed:
@@ -1282,6 +1309,7 @@ def combine(
     )
     table = flex.reflection_table.from_file(integrated_directory / "integrated.refl")
     table = _apply_resolution_limits(table, expts, params.d_min, params.d_max)
+    table = _apply_two_theta_limit(table, expts, params.min_two_theta)
     tables = parse_multiple_datasets([table])
     experiments = ExperimentList()
     experiments.extend(expts)
