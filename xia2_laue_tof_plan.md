@@ -394,7 +394,7 @@ RUN 1 BATCH 1 TO <nbatches>
 SCALES BATCH BFACTOR ON SECONDARY 0
 LAUE NORMGPR <lam_min> <lam_max>
 LAUE NORMLAMREF <lam_ref>
-SDCORRECTION NOREFINE 1.0 0.0 0.0
+SDCORRECTION REFINE
 REJECT 4
 OUTPUT MERGED UNMERGED
 EOF
@@ -403,6 +403,11 @@ EOF
 - `PROBE NEUTRON` switches off automatic `ANOMALOUS`, zeroes polarisation, makes
   `SCALES BATCH` the default (φ is not a scaling variable here) and reports
   rejections against 2θ.
+- **`SDCORRECTION REFINE` is the default.** On the rubredoxin strategy sims
+  (calculated, 2θ ≥ 35°) lawless finds SdFac 19.4; `NOREFINE` rejected 2709 of
+  9918 observations (37–57 % by 2θ) for CC½ 0.976 and I/σ 43.5, `REFINE` 526
+  (5 %, flat) for CC½ 0.965 and I/σ 11.4. Merged I against the McStas truth is
+  equal (Pearson 0.948 vs 0.943); REFINE keeps 124 more unique, at 0.958.
 - `NORMGPR` is the better default: it follows structure a low-order polynomial
   cannot and is **fixed after its pre-pass**, so it cannot trade against the other
   scale terms. `NORMCHEBYSHEV` is refined jointly. They are **mutually exclusive —

@@ -414,10 +414,11 @@ scaling {
               "one B factor per batch, which with a handful of stationary"
               "exposures may already be over-parameterised."
       .expert_level = 0
-    sdcorrection = "NOREFINE 1.0 0.0 0.0"
+    sdcorrection = "REFINE"
       .type = str
-      .help = "SDCORRECTION keyword. The default leaves the sigmas alone, so"
-              "that I/sigma stays comparable with the unscaled data."
+      .help = "SDCORRECTION keyword. Refined by default, as outlier rejection"
+              "trusts the sigmas: McStas ones are ~19x too small, and"
+              "\"NOREFINE 1.0 0.0 0.0\" then rejects good observations."
       .expert_level = 1
     anomalous = False
       .type = bool

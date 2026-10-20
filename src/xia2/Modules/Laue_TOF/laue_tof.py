@@ -399,7 +399,7 @@ class LawlessParams:
     chebyshev_degree: int = 6
     gpr_bins: int | None = None
     scales: str = "BATCH BFACTOR ON SECONDARY 0"
-    sdcorrection: str = "NOREFINE 1.0 0.0 0.0"
+    sdcorrection: str = "REFINE"
     anomalous: bool = False
     resolution: tuple[float, float] | None = None
     lambda_only: bool = False
