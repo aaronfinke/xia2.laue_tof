@@ -26,6 +26,7 @@ from xia2.Modules.Laue_TOF.laue_tof import (
     IndexingParams,
     IntegrationParams,
     LaueTOFSetup,
+    RefinementParams,
     SpotfindingParams,
 )
 
@@ -850,7 +851,7 @@ DETECTOR_PANELS = "hierarchical"
 DETECTOR_HIERARCHY_LEVEL = 1
 
 
-def refine(working_directory: pathlib.Path) -> None:
+def refine(working_directory: pathlib.Path, params: RefinementParams) -> None:
     """Run dials.refine on the indexing solution, for every exposure at once."""
     command = [
         _executable("dials.refine"),
@@ -862,6 +863,8 @@ def refine(working_directory: pathlib.Path) -> None:
         # MaNDi's 40 panels outnumber ~100 spots per exposure; those keep the DetCal
         "refinement.parameterisation.auto_reduction.action=fix",
     ]
+    if params.phil:
+        command.insert(1, os.fspath(params.phil))
     xia2_logger.notice(banner("Refining"))  # type: ignore
     _run_program(command, working_directory, "dials.refine")
     _record_log("refine", working_directory / "dials.refine.log")
@@ -1569,7 +1572,7 @@ def run_data_integration(
     if "refine" not in setup.options.steps:
         _report(results)
         return results
-    refine(run_directory)
+    refine(run_directory, setup.refinement_params)
 
     if "integrate" not in setup.options.steps:
         _report(results)

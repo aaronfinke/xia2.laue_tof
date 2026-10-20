@@ -256,6 +256,15 @@ class IndexingParams:
 
 
 @dataclass
+class RefinementParams:
+    phil: pathlib.Path | None = None
+
+    @classmethod
+    def from_phil(cls, params: iotbx.phil.scope_extract) -> RefinementParams:
+        return cls(_resolved_file(params.refinement.phil))
+
+
+@dataclass
 class IntegrationParams:
     method: str = "profile_1d_ibix"
     fallback_method: str = "summation"
@@ -432,6 +441,7 @@ class LaueTOFSetup:
     file_input: FileInput
     spotfinding_params: SpotfindingParams
     indexing_params: IndexingParams
+    refinement_params: RefinementParams
     integration_params: IntegrationParams
     export_params: ExportParams
     lawless_params: LawlessParams
@@ -521,6 +531,7 @@ def setup_from_phil(params: iotbx.phil.scope_extract) -> LaueTOFSetup:
         file_input=file_input,
         spotfinding_params=SpotfindingParams.from_phil(params),
         indexing_params=IndexingParams.from_phil(params),
+        refinement_params=RefinementParams.from_phil(params),
         integration_params=IntegrationParams.from_phil(params, file_input),
         export_params=ExportParams.from_phil(params),
         lawless_params=LawlessParams.from_phil(params),

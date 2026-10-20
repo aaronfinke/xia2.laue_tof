@@ -210,6 +210,18 @@ indexing {
 }
 """
 
+refinement_phil_str = """
+refinement {
+  phil = None
+    .type = path
+    .help = "Phil options file to use for dials.refine. Parameters defined in the"
+            "xia2.laue_tof phil scope will take precedent over identical options"
+            "defined in the phil file. iBIX needs separate_independent_sets=False"
+            "in it: see the plan."
+    .expert_level = 2
+}
+"""
+
 integration_phil_str = """
 integration {
   method = profile_1d_ibix
@@ -438,6 +450,7 @@ full_phil_str = (
     phil_str
     + spotfinding_phil_str
     + indexing_phil_str
+    + refinement_phil_str
     + integration_phil_str
     + output_phil_str
     + scaling_phil_str

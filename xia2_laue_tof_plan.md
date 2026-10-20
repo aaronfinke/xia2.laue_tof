@@ -144,6 +144,12 @@ Each cost a session; none is visible from the code.
   Level 1 on MaNDi is 40 panel groups × 6 parameters against ~100 spots per
   exposure; hCAII keeps 37 of 40 at their DetCal positions and refines to
   0.7–1.3 px.
+- **iBIX needs `refinement.phil` with `separate_independent_sets=False`.** Each
+  exposure has its own detector, so dials.refine runs one job per exposure and
+  recombines them through a per-experiment RMSD table it leaves empty when panel
+  pixel sizes differ, as iBIX's calibrated ones do: `IndexError` at
+  `refine.py:510`. One job instead: 30 TIM exposures, 4470 parameters, 7 min.
+  Not the default, as MaNDi would then refine every exposure in one matrix.
 - **`max_strong` is per exposure**, since the predictor assertion it guards is
   reached per refinement job (`dials.refine` refines each exposure separately and
   recombines).
