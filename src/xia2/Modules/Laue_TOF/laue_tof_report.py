@@ -24,6 +24,8 @@ from collections import OrderedDict
 
 import gemmi
 import numpy
+from dials.report.plots import ResolutionPlotsAndStats
+from iotbx import merging_statistics
 from jinja2 import ChoiceLoader, Environment, PackageLoader
 
 from xia2.Handlers.Files import FileHandler
@@ -223,6 +225,45 @@ def normalisation_table(xmlout: pathlib.Path) -> list[list[str]] | None:
     return None
 
 
+def _resolution_stats(report: Report, params) -> tuple[list, list, dict]:
+    """
+    Report.resolution_plots_and_stats without the anomalous statistics.
+
+    Neutron anomalous signal is negligible, so the anomalous traces and columns
+    only clutter the page.
+    """
+    n_bins = report.n_bins
+    while True:
+        try:
+            stats = merging_statistics.dataset_statistics(
+                report.intensities,
+                n_bins=n_bins,
+                cc_one_half_significance_level=params.cc_half_significance_level,
+                eliminate_sys_absent=params.eliminate_sys_absent,
+                use_internal_variance=params.use_internal_variance,
+                assert_is_not_unique_set_under_symmetry=False,
+            )
+            break
+        except merging_statistics.StatisticsError:
+            n_bins -= 3
+            if n_bins <= 5:
+                raise
+    # is_centric suppresses the CC_ano traces and columns
+    plotter = ResolutionPlotsAndStats(stats, None, is_centric=True)
+    plots = plotter.make_all_plots(cc_one_half_method=params.cc_half_method)
+    overall = plotter.overall_statistics_table(params.cc_half_method)
+    binned = plotter.merging_statistics_table(params.cc_half_method)
+
+    headers = binned[0]
+    keep = [i for i, header in enumerate(headers) if "anom" not in header]
+    # lawless normalises intensities to ~0.01, which DIALS's %.1f shows as 0.0
+    mean_i = headers.index("Mean I")
+    for row, bin_stats in zip(binned[1:], stats.bins):
+        row[mean_i] = f"{bin_stats.i_mean:.3g}"
+    binned = [[row[i] for i in keep] for row in binned]
+    return overall, binned, plots
+
+
 def _laue_graphs(
     scaled_unmerged_mtz: pathlib.Path,
     unmerged_mtz: pathlib.Path | None,
@@ -270,8 +311,8 @@ def generate_report(
     report = Report.from_unmerged_mtz(
         scaled_unmerged_mtz, params, report_dir=os.fspath(working_directory)
     )
-    overall_stats_table, merging_stats_table, stats_plots = (
-        report.resolution_plots_and_stats()
+    overall_stats_table, merging_stats_table, stats_plots = _resolution_stats(
+        report, params
     )
 
     json_data: dict = {}
