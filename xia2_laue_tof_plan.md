@@ -421,8 +421,9 @@ EOF
 - **Lawless 0.0.1 writes invalid XML**: it opens `<LAWLESS>` and closes
   `</AIMLESS>`, left from the rename, so strict parsers refuse it. The reader
   repairs that one mismatch. Worth fixing in lawless.
-- Statistics live in `Result/Dataset/<name>/{Overall,Inner,Outer}`, and the fitted
-  curve in `WavelengthNormalisationGPR` or `…Chebyshev`.
+- The fitted curve is in `WavelengthNormalisationGPR` or `…Chebyshev`.
+- `xia2.laue_tof.log` repeats two blocks of `lawless.log`: the ASCII `w(λ)` plot
+  (`w(lambda):` to `marks reference wavelength`) and the `SUMMARY_BEGIN`/`END` table.
 - Copied to `results/`: `scaled.mtz`, the unmerged output, `lawless.xml`, the log, and
   **`LAMBDANORM`** (`LAMBDANORM.plt` in newer builds) — a self-contained gnuplot
   script of `w(λ)` (GP carries a 1σ band, Chebyshev does not).

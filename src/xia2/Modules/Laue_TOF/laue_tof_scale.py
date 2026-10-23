@@ -265,7 +265,9 @@ def run_lawless(
         for path in sorted(working_directory.glob(f"{extra}*")):
             result_files.record_data(path)
 
-    _report_lawless(working_directory / "lawless.xml")
+    _report_lawless(
+        working_directory / "lawless.xml", working_directory / "lawless.log"
+    )
     return hklout
 
 
@@ -293,21 +295,6 @@ def lawless_xml(xmlout: pathlib.Path) -> ElementTree.Element | None:
     return root
 
 
-# What to report from the XML, and what to call it
-MERGING_STATISTICS = (
-    ("ResolutionLow", "low resolution"),
-    ("ResolutionHigh", "high resolution"),
-    ("NumberObservations", "observations"),
-    ("NumberReflections", "unique"),
-    ("Multiplicity", "multiplicity"),
-    ("Completeness", "completeness"),
-    ("MeanIoverSD", "<I/sigma>"),
-    ("RmergeOverall", "Rmerge"),
-    ("RmeasOverall", "Rmeas"),
-    ("RpimOverall", "Rpim"),
-    ("CChalf", "CC1/2"),
-)
-
 NORMALISATION_DETAIL = (
     ("ReferenceWavelength", "reference wavelength"),
     ("LambdaMin", "from"),
@@ -318,12 +305,40 @@ NORMALISATION_DETAIL = (
 )
 
 
-def _report_lawless(xmlout: pathlib.Path) -> None:
-    """Log the wavelength normalisation and the merging statistics."""
+def lawless_log_sections(logfile: pathlib.Path) -> tuple[list[str], list[str]]:
+    """The ASCII w(lambda) plot and the closing summary from a lawless log."""
+    lines = logfile.read_text().splitlines()
+    spectrum: list[str] = []
+    summary: list[str] = []
+    for i, line in enumerate(lines):
+        if line.strip() == "w(lambda):":
+            end = _first_line(lines, i, "marks reference wavelength")
+            if end is not None:
+                spectrum = lines[i : end + 1]
+        elif "<!--SUMMARY_BEGIN-->" in line:
+            end = _first_line(lines, i, "<!--SUMMARY_END-->")
+            if end is not None:
+                summary = lines[i + 1 : end]
+    return spectrum, summary
+
+
+def _first_line(lines: list[str], start: int, text: str) -> int | None:
+    return next((j for j in range(start, len(lines)) if text in lines[j]), None)
+
+
+def _report_lawless(xmlout: pathlib.Path, logfile: pathlib.Path) -> None:
+    """Log lawless's warnings, its w(lambda) plot and its summary."""
+    _report_lawless_xml(xmlout)
+    if not logfile.is_file():
+        return
+    for section in lawless_log_sections(logfile):
+        if section:
+            xia2_logger.info("\n".join(section))
+
+
+def _report_lawless_xml(xmlout: pathlib.Path) -> None:
     if not xmlout.is_file():
-        xia2_logger.warning(
-            f"lawless wrote no {xmlout.name}, so it reported no statistics"
-        )
+        xia2_logger.warning(f"lawless wrote no {xmlout.name}")
         return
     root = lawless_xml(xmlout)
     if root is None:
@@ -349,27 +364,6 @@ def _report_lawless(xmlout: pathlib.Path) -> None:
                 f" {', '.join(detail)}"
             )
         break
-
-    # Result/Dataset holds one element per statistic, each split into Overall,
-    # Inner and Outer shells
-    dataset = root.find("Result/Dataset")
-    if dataset is None:
-        return
-    for shell, description in (
-        ("Overall", "overall"),
-        ("Outer", "outer shell"),
-    ):
-        reported = []
-        for name, label in MERGING_STATISTICS:
-            element = dataset.find(f"{name}/{shell}")
-            if element is None:
-                element = dataset.find(name)
-            if element is not None and element.text and element.text.strip():
-                reported.append(f"{label} {element.text.strip()}")
-        if reported:
-            xia2_logger.info(
-                f"Merging statistics ({description}): " + ", ".join(reported)
-            )
 
 
 def _report(
