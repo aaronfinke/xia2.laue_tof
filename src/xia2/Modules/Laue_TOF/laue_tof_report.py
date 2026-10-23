@@ -28,10 +28,10 @@ from dials.report.plots import ResolutionPlotsAndStats
 from iotbx import merging_statistics
 from jinja2 import ChoiceLoader, Environment, PackageLoader
 
-from xia2.Handlers.Files import FileHandler
 from xia2.Handlers.Streams import banner
 from xia2.Modules.Analysis import phil_scope
 from xia2.Modules.Laue_TOF.laue_tof_scale import lawless_xml
+from xia2.Modules.Laue_TOF.util import result_files
 from xia2.Modules.Report import Report
 from xia2.XIA2Version import Version
 
@@ -383,8 +383,8 @@ def generate_report(
     json_file = working_directory / f"{prefix}-report.json"
     html_file.write_bytes(html.encode("utf-8", "xmlcharrefreplace"))
     json_file.write_text(json.dumps(json_data, indent=None))
-    FileHandler.record_html_file(f"{prefix} report", str(html_file))
-    FileHandler.record_data_file(str(json_file))
+    result_files.record_data(html_file)
+    result_files.record_data(json_file)
     xia2_logger.info(
         f"Wrote {html_file.name}, with {len(laue_graphs)} Laue plot(s) beside the"
         " standard analysis"

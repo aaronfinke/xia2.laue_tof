@@ -14,7 +14,7 @@ tests and docs, not structure.
 | `Modules/Laue_TOF/laue_tof_mtz.py` | finishes dials.export's unmerged MTZ + `validate_unmerged_mtz` |
 | `Modules/Laue_TOF/laue_tof_scale.py` | the lawless step |
 | `Modules/Laue_TOF/laue_tof_report.py` | the report step |
-| `Modules/Laue_TOF/util.py` | `report_timing` (copied, never imported from SSX) |
+| `Modules/Laue_TOF/util.py` | `report_timing` (copied, never imported from SSX), `result_files` |
 | `cli/laue_tof.py` | the command, registered in `setup.py` |
 
 ### Done
@@ -91,6 +91,9 @@ by a locally built LAWLESS 0.0.1 (the Laue branch of aimless).
   for TOF-flattened data and are out of scope.
 - `refine_bravais_settings` stays a toggleable, informational step.
 - Local lawless build — the path is phil-configurable.
+- Layout: every program runs in `processing/`; at exit, even after a failure,
+  `result_files` copies the logs to `results/` as `01_…`, `02_…` in run order,
+  beside the data files and the report. xia2's `LogFiles/`/`DataFiles/` are unused.
 - No POINTLESS: dials.export's MTZ is already sorted and in the asymmetric unit, and
   lawless reads it directly. Symmetry is known in these experiments; when it is
   not, `dials.refine_bravais_settings` will supply it, not pointless.
@@ -412,16 +415,15 @@ EOF
   cannot and is **fixed after its pre-pass**, so it cannot trade against the other
   scale terms. `NORMCHEBYSHEV` is refined jointly. They are **mutually exclusive —
   giving both is fatal**. Band limits come from the `wavelength_cal` range.
-- **lawless needs an absolute HKLIN path.** It writes its outputs into its
-  working directory, so it gets one of its own, and a relative HKLIN then resolves
-  against the wrong place — reported, misleadingly, as *"LAUE requires a wavelength
+- **lawless needs an absolute HKLIN path.** It runs in `processing/`, and a
+  relative HKLIN resolves against the wrong place — reported, misleadingly, as *"LAUE requires a wavelength
   for every observation"*. A `Cannot open file` is now caught directly.
 - **Lawless 0.0.1 writes invalid XML**: it opens `<LAWLESS>` and closes
   `</AIMLESS>`, left from the rename, so strict parsers refuse it. The reader
   repairs that one mismatch. Worth fixing in lawless.
 - Statistics live in `Result/Dataset/<name>/{Overall,Inner,Outer}`, and the fitted
   curve in `WavelengthNormalisationGPR` or `…Chebyshev`.
-- Outputs registered: `scaled.mtz`, the unmerged output, `lawless.xml`, the log, and
+- Copied to `results/`: `scaled.mtz`, the unmerged output, `lawless.xml`, the log, and
   **`LAMBDANORM`** (`LAMBDANORM.plt` in newer builds) — a self-contained gnuplot
   script of `w(λ)` (GP carries a 1σ band, Chebyshev does not).
 - **One batch per exposure** means few parameters per batch, so with a handful of

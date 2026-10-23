@@ -18,7 +18,6 @@ from dxtbx.model import Crystal, ExperimentList
 from dxtbx.serialize import load
 
 from xia2.Driver.timing import record_step
-from xia2.Handlers.Files import FileHandler
 from xia2.Handlers.Streams import banner
 from xia2.Modules.Laue_TOF.laue_tof import (
     NO_FALLBACK,
@@ -30,6 +29,7 @@ from xia2.Modules.Laue_TOF.laue_tof import (
     RefinementParams,
     SpotfindingParams,
 )
+from xia2.Modules.Laue_TOF.util import PROCESSING, result_files
 
 xia2_logger = logging.getLogger(__name__)
 
@@ -142,11 +142,6 @@ def _run_program(
             f"{name} returned error status:\n{result.stderr or result.stdout}"
         )
     return result
-
-
-def _record_log(tag: str, logfile: pathlib.Path) -> None:
-    if logfile.is_file():
-        FileHandler.record_log_file(tag, str(logfile))
 
 
 # Neutron wavelength from time of flight: lambda[A] = H_OVER_M * t[s] / L[m]
@@ -321,9 +316,7 @@ def run_import(
             f"dials.import failed on {image}, which dxtbx reads with"
             f" {_format_class_name(image)}.\n{e}"
         ) from e
-    _record_log(
-        f"{working_directory.name} import", working_directory / "dials.import.log"
-    )
+    result_files.record_log(working_directory / "dials.import.log")
 
     if file_input.detector_calibration:
         apply_detector_calibration(experiments, file_input.detector_calibration)
@@ -446,10 +439,7 @@ def find_spots(
 
     xia2_logger.notice(banner("Spotfinding"))  # type: ignore
     _run_program(command, working_directory, "dials.find_spots")
-    _record_log(
-        f"{working_directory.name} find_spots",
-        working_directory / "dials.find_spots.log",
-    )
+    result_files.record_log(working_directory / "dials.find_spots.log")
 
     strong = flex.reflection_table.from_file(working_directory / "strong.refl")
     counts = [(strong["id"] == i).count(True) for i in range(n_exposures)]
@@ -795,7 +785,7 @@ def index(
             results, positions = _assess_rung(
                 working_directory, tag, method, params, rung, n_strong
             )
-        _record_log(f"index ({tag})", working_directory / f"dials.index.{tag}.log")
+        result_files.record_log(working_directory / f"dials.index.{tag}.log")
 
         for exposure in rung:
             result = results.get(exposure)
@@ -868,7 +858,7 @@ def refine(working_directory: pathlib.Path, params: RefinementParams) -> None:
         command.insert(1, os.fspath(params.phil))
     xia2_logger.notice(banner("Refining"))  # type: ignore
     _run_program(command, working_directory, "dials.refine")
-    _record_log("refine", working_directory / "dials.refine.log")
+    result_files.record_log(working_directory / "dials.refine.log")
 
 
 def _tof_integrate_command(
@@ -988,18 +978,12 @@ def _run_tof_integrate(
             f"Integration with method={method} failed, falling back to"
             f" {fallback}. The failure was:\n{str(e).strip().splitlines()[-1]}"
         )
-        _record_log(
-            f"{working_directory.name} integrate ({tag}, failed)",
-            working_directory / f"tof_integrate_{tag}.log",
-        )
+        result_files.record_log(working_directory / f"tof_integrate_{tag}.log")
         return _run_tof_integrate(
             working_directory, params, fallback, mask, experiments, reflections, pass_
         )
 
-    _record_log(
-        f"{working_directory.name} integrate ({tag})",
-        working_directory / f"tof_integrate_{tag}.log",
-    )
+    result_files.record_log(working_directory / f"tof_integrate_{tag}.log")
     integrated = working_directory / f"integrated_{tag}.refl"
     if not integrated.is_file():
         raise ValueError(f"dials.tof_integrate did not write {integrated.name}")
@@ -1220,8 +1204,8 @@ def integrate(
         working_directory / "integrated.expt",
     )
     _record_lorentz(integrated, True)
-    FileHandler.record_data_file(str(working_directory / "integrated.expt"))
-    FileHandler.record_data_file(str(integrated))
+    result_files.record_data(working_directory / "integrated.expt")
+    result_files.record_data(integrated)
     return integrated
 
 
@@ -1287,7 +1271,6 @@ def _apply_two_theta_limit(
 
 def combine(
     working_directory: pathlib.Path,
-    integrated_directory: pathlib.Path,
     results: list[ExposureResult],
     params: ExportParams,
 ) -> tuple[pathlib.Path, pathlib.Path]:
@@ -1301,13 +1284,12 @@ def combine(
     indexed = [result for result in results if result.indexed]
     if not indexed:
         raise ValueError("No exposure was integrated, so there is nothing to combine")
-    working_directory.mkdir(parents=True, exist_ok=True)
     xia2_logger.notice(banner("Combining"))  # type: ignore
 
     expts = load.experiment_list(
-        integrated_directory / "integrated.expt", check_format=False
+        working_directory / "integrated.expt", check_format=False
     )
-    table = flex.reflection_table.from_file(integrated_directory / "integrated.refl")
+    table = flex.reflection_table.from_file(working_directory / "integrated.refl")
     table = _apply_resolution_limits(table, expts, params.d_min, params.d_max)
     table = _apply_two_theta_limit(table, expts, params.min_two_theta)
     tables = parse_multiple_datasets([table])
@@ -1339,8 +1321,8 @@ def combine(
         f"Combined {len(experiments)} experiment(s), {combined.size()} reflections,"
         f" into {experiments_file.name} and {reflections_file.name}"
     )
-    FileHandler.record_data_file(str(experiments_file))
-    FileHandler.record_data_file(str(reflections_file))
+    result_files.record_data(experiments_file)
+    result_files.record_data(reflections_file)
     return experiments_file, reflections_file
 
 
@@ -1470,16 +1452,16 @@ def export_shelx(
 
     xia2_logger.notice(banner("Exporting"))  # type: ignore
     _run_program(command, working_directory, "dials.export")
-    _record_log("export", working_directory / "dials.export.log")
+    result_files.record_log(working_directory / "dials.export.log")
 
     hklout = working_directory / "dials.hkl"
     if not hklout.is_file():
         raise ValueError("dials.export did not write dials.hkl")
     xia2_logger.info(f"Exported the {intensity} intensities to {hklout.name}")
-    FileHandler.record_data_file(str(hklout))
+    result_files.record_data(hklout)
     ins = working_directory / "dials.ins"
     if ins.is_file():
-        FileHandler.record_data_file(str(ins))
+        result_files.record_data(ins)
     return hklout
 
 
@@ -1511,7 +1493,7 @@ def unmerged_mtz(
 
     xia2_logger.notice(banner("Writing the unmerged MTZ"))  # type: ignore
     _run_program(command, working_directory, "dials.export")
-    _record_log("export_mtz", working_directory / "dials.export_mtz.log")
+    result_files.record_log(working_directory / "dials.export_mtz.log")
 
     mtz_file = working_directory / "unmerged.mtz"
     if not mtz_file.is_file():
@@ -1521,7 +1503,7 @@ def unmerged_mtz(
     )
     validate_unmerged_mtz(mtz_file, expected_batches=n_experiments)
     xia2_logger.info(f"Exported the {intensity} intensities to {mtz_file.name}")
-    FileHandler.record_data_file(str(mtz_file))
+    result_files.record_data(mtz_file)
     return mtz_file
 
 
@@ -1557,7 +1539,7 @@ def run_data_integration(
     inputs += [("template", t) for t in setup.file_input.templates]
     inputs += [("directory", d) for d in setup.file_input.directories]
 
-    run_directory = root_working_directory / "run"
+    run_directory = root_working_directory / PROCESSING
     run_directory.mkdir(parents=True, exist_ok=True)
     xia2_logger.notice(banner(f"Processing {len(inputs)} exposure(s)"))  # type: ignore
     for i, (_, path) in enumerate(inputs, start=1):
@@ -1614,25 +1596,23 @@ def run_data_integration(
     if "combine" not in setup.options.steps:
         return results
 
-    scale_directory = root_working_directory / "scale"
     experiments_file, reflections_file = combine(
-        scale_directory, run_directory, results, setup.export_params
+        run_directory, results, setup.export_params
     )
     if "export" in setup.options.steps:
-        export_shelx(scale_directory, setup.export_params)
+        export_shelx(run_directory, setup.export_params)
     if "unmerged_mtz" not in setup.options.steps:
         return results
-    mtz_file = unmerged_mtz(scale_directory, setup.export_params)
+    mtz_file = unmerged_mtz(run_directory, setup.export_params)
 
     if "lawless" in setup.options.steps:
         from xia2.Modules.Laue_TOF.laue_tof_scale import scale
 
         scale(
-            scale_directory,
+            run_directory,
             mtz_file,
             setup.lawless_params,
             _lorentz_applied(reflections_file),
             setup.options.steps,
-            report_directory=root_working_directory,
         )
     return results

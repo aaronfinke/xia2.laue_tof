@@ -35,8 +35,8 @@ import xia2.Driver.timing
 import xia2.Handlers.Streams
 from xia2.Applications.xia2_main import write_citations
 from xia2.Handlers.Citations import Citations
-from xia2.Handlers.Files import cleanup
 from xia2.Modules.Laue_TOF.laue_tof import full_phil_str, run_xia2_laue_tof
+from xia2.Modules.Laue_TOF.util import RESULTS, collect_results
 
 phil_scope = iotbx.phil.parse(full_phil_str)
 
@@ -72,7 +72,7 @@ def run(args=sys.argv[1:]):
 
     cwd = pathlib.Path.cwd()
     try:
-        with cleanup(cwd):
+        with collect_results(cwd / RESULTS):
             run_xia2_laue_tof(cwd, params)
     except ValueError as e:
         # Unlike xia2.ssx, which exits 0 here, a run that could not do what it

@@ -25,10 +25,10 @@ import gemmi
 import numpy
 
 from xia2.Driver.timing import record_step
-from xia2.Handlers.Files import FileHandler
 from xia2.Handlers.Streams import banner
 from xia2.Modules.Laue_TOF.laue_tof import LawlessParams
 from xia2.Modules.Laue_TOF.laue_tof_mtz import check_wavelength_column
+from xia2.Modules.Laue_TOF.util import result_files
 
 xia2_logger = logging.getLogger(__name__)
 
@@ -126,7 +126,7 @@ def _run(
             encoding="utf-8",
         )
     logfile.write_text(result.stdout + result.stderr)
-    FileHandler.record_log_file(name, str(logfile))
+    result_files.record_log(logfile)
     if "Cannot open file" in result.stdout:
         raise ValueError(
             f"{name} could not open one of its input files. The command was:\n"
@@ -222,17 +222,11 @@ def run_lawless(
     lorentz_applied: bool,
     hklout_name: str = "scaled.mtz",
 ) -> pathlib.Path:
-    """
-    Normalise for wavelength, scale and merge.
-
-    lawless writes LAMBDANORM, SCALES and ROGUES into the current directory, so
-    it is given one of its own.
-    """
+    """Normalise for wavelength, scale and merge."""
     program = _find_program(("lawless", "aimless"), params.executable, "lawless")
-    working_directory.mkdir(parents=True, exist_ok=True)
     working_directory = working_directory.resolve()
-    # lawless writes LAMBDANORM, SCALES and ROGUES into the directory it runs
-    # in, so it is given one of its own and HKLIN has to be absolute
+    # lawless writes LAMBDANORM, SCALES and ROGUES where it runs, and resolves
+    # a relative HKLIN against somewhere else
     hklin = hklin.resolve()
     hklout = working_directory / hklout_name
     xia2_logger.notice(banner("Scaling with lawless"))  # type: ignore
@@ -252,17 +246,24 @@ def run_lawless(
     if not hklout.is_file():
         raise ValueError(f"lawless did not write {hklout}")
 
-    FileHandler.record_data_file(str(hklout))
+    result_files.record_data(hklout)
+    result_files.record_data(working_directory / "lawless.xml")
     # The unmerged output carries the scaled intensities, with SCALEUSED as the
     # factor already applied, so nothing downstream may apply it again.
     unmerged = working_directory / f"{hklout.stem}_unmerged.mtz"
     if unmerged.is_file():
-        FileHandler.record_data_file(str(unmerged))
-    # lawless writes these beside its log, and LAMBDANORM in particular is how
-    # the normalisation curve is read
-    for extra in ("LAMBDANORM", "SCALES", "ROGUES", "NORMPLOT", "CORRELPLOT"):
+        result_files.record_data(unmerged)
+    for extra in (
+        "LAMBDANORM",
+        "SCALES",
+        "ROGUES",
+        "ROGUEPLOT",
+        "NORMPLOT",
+        "CORRELPLOT",
+        "ANOMPLOT",
+    ):
         for path in sorted(working_directory.glob(f"{extra}*")):
-            FileHandler.record_log_file(f"lawless {path.name}", str(path))
+            result_files.record_data(path)
 
     _report_lawless(working_directory / "lawless.xml")
     return hklout
@@ -410,7 +411,6 @@ def scale(
     lawless_params: LawlessParams,
     lorentz_applied: bool,
     steps: list[str],
-    report_directory: pathlib.Path | None = None,
 ) -> pathlib.Path | None:
     """
     Run the scaling tail, as far as the steps and the programs available allow.
@@ -422,15 +422,13 @@ def scale(
         return None
     try:
         scaled = run_lawless(
-            working_directory / "scaled",
+            working_directory,
             unmerged_mtz,
             lawless_params,
             lorentz_applied,
         )
         if "report" in steps:
-            # The report belongs where the user will look for it, which is the
-            # run directory rather than the scaling one
-            _report(report_directory or working_directory, scaled, unmerged_mtz)
+            _report(working_directory, scaled, unmerged_mtz)
         return scaled
     except FileNotFoundError as e:
         xia2_logger.warning(
